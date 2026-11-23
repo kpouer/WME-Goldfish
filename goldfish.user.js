@@ -36,6 +36,8 @@
     const QUOTA_DISPLAY_MS = 30 * 1000;      // rafraîchissement de l'affichage (les éditions sortent de la fenêtre)
     // Plafond d'éditions scriptées par heure, par pays (clé : code pays WME, ou nom). Charte France §3.3 : 500/h.
     const HOURLY_LIMITS = { FR: 500, France: 500 };
+    // Pays où la fusion de segments est interdite (mergeSegments recrée le segment : charte France §3.1).
+    const MERGE_FORBIDDEN = new Set(['FR', 'France']);
     // Pays où la fusion de segments est limitée aux segments non enregistrés (liste à compléter).
     const MERGE_UNSAVED_ONLY = { FR: true, France: true };
 
@@ -46,6 +48,8 @@
     let countLabel;
     let cleanButton;
     const checkboxes = {};
+    /** Nœuds texte des libellés des cases (certains changent selon le pays). */
+    const optionLabels = {};
     let toggleButton;
     let expanded = false;
     let floating = false;
@@ -68,9 +72,7 @@
     let lastRun = null;
     let reportPanel;
 
-    /** Ids des segments touchés depuis le dernier enregistrement (le SDK n'expose pas d'état "modifié"). */
-    const editedIds = new Set();
-    /** Résultat courant : [{ id, length }] */
+    /** Résultat courant : [{ id, length, geometry }] (segments non enregistrés < MAX_LENGTH_M) */
     let shortSegments = [];
     /** Nœuds non connectés des nouveaux segments */
     let unconnectedNodes = [];
@@ -86,12 +88,13 @@
             optShow: 'Options',
             cleanTitle: 'Clean : exécute les actions cochées',
             cleanTitleCount: (n) => `Clean : exécute les actions cochées (${n} segment${n > 1 ? 's' : ''} < ${MAX_LENGTH_M} m)`,
-            delete: `Supprimer les segments < ${MAX_LENGTH_M} m`,
-            clean: 'Nettoyer les nouveaux segments et la sélection (sans nom, sans ville)',
-            roadType: 'Type Street (segments non enregistrés et sélection)',
-            unpaved: 'Retirer « non bitumé » (segments non enregistrés et sélection)',
-            twoWay: 'Double sens (segments non enregistrés et sélection)',
+            delete: `Supprimer les segments non enregistrés < ${MAX_LENGTH_M} m`,
+            clean: 'Nettoyer les segments non enregistrés (sans nom, sans ville)',
+            roadType: 'Type Street (segments non enregistrés)',
+            unpaved: 'Retirer « non bitumé » (segments non enregistrés)',
+            twoWay: 'Double sens (segments non enregistrés)',
             geometry: 'Simplifier la géométrie (points de forme, nœuds inutiles)',
+            geometryNoMerge: 'Simplifier la géométrie (points de forme ; fusion de segments interdite ici)',
             mergeFailed: (msg) => `Goldfish : fusion impossible (${msg})`,
             reportTitle: 'Goldfish : changements effectués',
             reportNone: 'Aucun changement',
@@ -120,12 +123,13 @@
             optShow: 'Options',
             cleanTitle: 'Clean: runs the checked actions',
             cleanTitleCount: (n) => `Clean: runs the checked actions (${n} segment${n > 1 ? 's' : ''} < ${MAX_LENGTH_M} m)`,
-            delete: `Delete segments < ${MAX_LENGTH_M} m`,
-            clean: 'Clean new segments and the selection (no name, no city)',
-            roadType: 'Street type (unsaved segments and selection)',
-            unpaved: 'Remove "unpaved" (unsaved segments and selection)',
-            twoWay: 'Two-way (unsaved segments and selection)',
+            delete: `Delete unsaved segments < ${MAX_LENGTH_M} m`,
+            clean: 'Clean unsaved segments (no name, no city)',
+            roadType: 'Street type (unsaved segments)',
+            unpaved: 'Remove "unpaved" (unsaved segments)',
+            twoWay: 'Two-way (unsaved segments)',
             geometry: 'Simplify geometry (shape points, useless nodes)',
+            geometryNoMerge: 'Simplify geometry (shape points; segment merge not allowed here)',
             mergeFailed: (msg) => `Goldfish: merge failed (${msg})`,
             reportTitle: 'Goldfish: changes made',
             reportNone: 'No change',
@@ -173,12 +177,12 @@
             layerName: LAYER_NAME,
             styleRules: [{
                 style: {
-                    strokeColor: '#ff00ff',
-                    strokeOpacity: 0.9,
-                    strokeWidth: 12,
-                    fillColor: '#ff00ff',
-                    fillOpacity: 0.6,
-                    pointRadius: 10,
+                    strokeColor: '#ff0000',
+                    strokeOpacity: 1,
+                    strokeWidth: 3,
+                    fillColor: '#ff0000',
+                    fillOpacity: 0,
+                    pointRadius: 24,
                 },
             }],
         });
@@ -245,21 +249,12 @@
         return total;
     }
 
-    /** Nouveau segment (id négatif) ou segment touché depuis le dernier enregistrement. */
-    function isBeingEdited(segment) {
-        return segment.id < 0 || editedIds.has(segment.id);
-    }
-
+    /** Segments non enregistrés (id négatif) plus courts que MAX_LENGTH_M : jamais un segment existant. */
     async function findShortSegments() {
-        // Plus aucune modification en attente : rien n'est "en cours de modification".
-        if (await sdk.Editing.getUnsavedChangesCount() === 0) {
-            editedIds.clear();
-            return [];
-        }
         const segments = await sdk.DataModel.Segments.getAll();
         const result = [];
         for (const segment of segments) {
-            if (!isBeingEdited(segment)) continue;
+            if (segment.id >= 0) continue;
             const length = lineLength(segment.geometry);
             if (length < MAX_LENGTH_M) result.push({ id: segment.id, length, geometry: segment.geometry });
         }
@@ -306,6 +301,14 @@
 
     // ------------------------------------------------------ surbrillance
 
+    /** Milieu (moyenne des extrémités) d'une LineString : suffisant pour un segment de moins d'un mètre. */
+    function lineMidpoint(geometry) {
+        const c = geometry.coordinates;
+        const [lon1, lat1] = c[0];
+        const [lon2, lat2] = c[c.length - 1];
+        return [(lon1 + lon2) / 2, (lat1 + lat2) / 2];
+    }
+
     async function drawHighlights() {
         await sdk.Map.removeAllFeaturesFromLayer({ layerName: UNCONNECTED_LAYER_NAME });
         for (const { id, geometry } of unconnectedNodes) {
@@ -323,7 +326,8 @@
         for (const { id, geometry } of shortSegments) {
             await sdk.Map.addFeatureToLayer({
                 layerName: LAYER_NAME,
-                feature: { type: 'Feature', id: `goldfish-${id}`, geometry, properties: { segmentId: id } },
+                // Un segment < 1 m est invisible : on l'entoure d'un cercle rouge centré sur son milieu.
+                feature: { type: 'Feature', id: `goldfish-${id}`, geometry: { type: 'Point', coordinates: lineMidpoint(geometry) }, properties: { segmentId: id } },
             });
         }
     }
@@ -373,6 +377,12 @@
     function mergeUnsavedOnly() {
         if (!currentCountry) return false;
         return Boolean(MERGE_UNSAVED_ONLY[currentCountry.key] ?? MERGE_UNSAVED_ONLY[currentCountry.name]);
+    }
+
+    /** Fusion de segments permise ? Refusée en France, et par prudence si le pays est inconnu. */
+    function isMergeAllowed() {
+        if (!currentCountry) return false;
+        return !MERGE_FORBIDDEN.has(currentCountry.key) && !MERGE_FORBIDDEN.has(currentCountry.name);
     }
 
     function toCountryInfo(country) {
@@ -573,7 +583,8 @@
                 savePrefs({ ...loadPrefs(), checked: Object.fromEntries(Object.entries(checkboxes).map(([k, b]) => [k, b.checked])) });
             });
             checkboxes[key] = box;
-            label.append(box, document.createTextNode(t(key)));
+            optionLabels[key] = document.createTextNode(t(key));
+            label.append(box, optionLabels[key]);
             body.appendChild(label);
         }
         document.body.appendChild(body);
@@ -724,6 +735,8 @@
         countLabel.style.color = '#c2185b';
         countLabel.style.fontWeight = 'bold';
         cleanButton.title = n === 0 ? t('cleanTitle') : t('cleanTitleCount', n);
+        // La fusion de segments dépend du pays : le libellé suit le pays courant.
+        if (optionLabels.geometry) optionLabels.geometry.textContent = t(isMergeAllowed() ? 'geometry' : 'geometryNoMerge');
         updateQuotaLabel();
     }
 
@@ -894,15 +907,10 @@
     }
 
     async function cleanNewSegments() {
-        // Nouveaux segments + segments sélectionnés (jamais tous les segments visibles).
-        const ids = new Set((await sdk.DataModel.Segments.getAll()).filter((s) => s.id < 0).map((s) => s.id));
-        const selection = await sdk.Editing.getSelection();
-        if (selection && String(selection.objectType).toLowerCase() === 'segment') {
-            for (const id of selection.ids ?? []) ids.add(id);
-        }
-        const targets = [...ids].map((id) => ({ id }));
+        // Segments pas encore enregistrés uniquement (id négatif) : un segment existant garde son nom et sa ville.
+        const targets = (await sdk.DataModel.Segments.getAll()).filter((s) => s.id < 0).map((s) => ({ id: s.id }));
         if (targets.length === 0) {
-            console.log(`[${SCRIPT_ID}] clean : aucun segment nouveau ou sélectionné`);
+            console.log(`[${SCRIPT_ID}] clean : aucun segment non enregistré`);
             return;
         }
         const streetId = await getEmptyStreetId();
@@ -923,19 +931,14 @@
         console.log(`[${SCRIPT_ID}] ${cleaned}/${targets.length} segment(s) nettoyé(s)`);
     }
 
-    /** Segments non enregistrés (id négatif) + segments sélectionnés. */
-    async function getNewOrSelectedIds() {
-        const ids = new Set((await sdk.DataModel.Segments.getAll()).filter((s) => s.id < 0).map((s) => s.id));
-        const selection = await sdk.Editing.getSelection();
-        if (selection && String(selection.objectType).toLowerCase() === 'segment') {
-            for (const id of selection.ids ?? []) ids.add(id);
-        }
-        return [...ids];
+    /** Segments non enregistrés (id négatif) uniquement : un segment existant n'est jamais modifié ici. */
+    async function getUnsavedIds() {
+        return (await sdk.DataModel.Segments.getAll()).filter((s) => s.id < 0).map((s) => s.id);
     }
 
-    /** Applique `apply(segment, id)` à chaque segment ciblé ; `apply` retourne false si rien à faire. */
-    async function updateNewOrSelected(label, apply) {
-        const ids = await getNewOrSelectedIds();
+    /** Applique `apply(segment, id)` à chaque segment non enregistré ; `apply` retourne false si rien à faire. */
+    async function updateUnsaved(label, apply) {
+        const ids = await getUnsavedIds();
         let done = 0;
         for (const id of ids) {
             if (quotaBlocked) break;
@@ -951,7 +954,7 @@
 
     function setRoadTypeStreet() {
         // updateSegment échoue (InvalidStateError) quand rien ne change : on l'évite.
-        return updateNewOrSelected('type Street', async (segment, id) => {
+        return updateUnsaved('type Street', async (segment, id) => {
             if (segment.roadType === STREET_ROAD_TYPE) return false;
             if (!reserveEdits([`s${id}`])) return false;
             await sdk.DataModel.Segments.updateSegment({ segmentId: id, roadType: STREET_ROAD_TYPE });
@@ -960,7 +963,7 @@
     }
 
     function removeUnpaved() {
-        return updateNewOrSelected('non bitumé', async (segment, id) => {
+        return updateUnsaved('non bitumé', async (segment, id) => {
             if (!segment.flagAttributes?.unpaved) return false;
             if (!reserveEdits([`s${id}`])) return false;
             await sdk.DataModel.Segments.updateSegment({ segmentId: id, flagAttributes: { unpaved: false } });
@@ -969,7 +972,7 @@
     }
 
     function setTwoWay() {
-        return updateNewOrSelected('double sens', async (segment, id) => {
+        return updateUnsaved('double sens', async (segment, id) => {
             if (segment.isTwoWay) return false;
             if (!reserveEdits([`s${id}`])) return false;
             await sdk.DataModel.Segments.updateDirection({ segmentId: id, direction: 'TWO_WAY' });
@@ -1246,7 +1249,8 @@
     async function simplifyGeometry() {
         try {
             let segments = await getTargetSegments();
-            const merged = await mergeUselessNodes(segments);
+            // Pas de fusion en France (la fusion recrée le segment) ; la simplification des points de forme reste faite.
+            const merged = isMergeAllowed() ? await mergeUselessNodes(segments) : 0;
             if (merged > 0) segments = await getTargetSegments(); // les ids ont changé après fusion
             let removed = 0;
             for (const [id, segment] of segments) {
@@ -1306,37 +1310,29 @@
     function registerEvents() {
         sdk.Events.trackDataModelEvents({ dataModelName: 'segments' });
 
-        const track = (ids) => {
-            for (const id of ids) editedIds.add(id);
-            scheduleRefresh();
-        };
-
         sdk.Events.on({
             eventName: 'wme-data-model-objects-changed',
-            eventHandler: ({ dataModelName, objectIds }) => {
-                if (dataModelName === 'segments') track(objectIds);
+            eventHandler: ({ dataModelName }) => {
+                if (dataModelName === 'segments') scheduleRefresh();
             },
         });
         sdk.Events.on({
             eventName: 'wme-data-model-objects-added',
             eventHandler: ({ dataModelName, objectIds }) => {
                 // Les segments chargés depuis le serveur ont un id positif : seuls les nouveaux comptent.
-                if (dataModelName === 'segments') track(objectIds.filter((id) => id < 0));
+                if (dataModelName === 'segments' && objectIds.some((id) => id < 0)) scheduleRefresh();
             },
         });
         sdk.Events.on({
             eventName: 'wme-data-model-objects-removed',
-            eventHandler: ({ dataModelName, objectIds }) => {
-                if (dataModelName !== 'segments') return;
-                for (const id of objectIds) editedIds.delete(id);
-                scheduleRefresh();
+            eventHandler: ({ dataModelName }) => {
+                if (dataModelName === 'segments') scheduleRefresh();
             },
         });
         sdk.Events.on({
             eventName: 'wme-data-model-objects-saved',
             eventHandler: ({ dataModelName }) => {
                 if (dataModelName !== 'segments') return;
-                editedIds.clear();
                 commitPendingEdits();
                 // Enregistré : plus rien à annuler côté Goldfish.
                 lastRun = null;
