@@ -36,6 +36,8 @@
     const QUOTA_DISPLAY_MS = 30 * 1000;      // rafraîchissement de l'affichage (les éditions sortent de la fenêtre)
     // Plafond d'éditions scriptées par heure, par pays (clé : code pays WME, ou nom). Charte France §3.3 : 500/h.
     const HOURLY_LIMITS = { FR: 500, France: 500 };
+    // Pays où la fusion de segments est limitée aux segments non enregistrés (liste à compléter).
+    const MERGE_UNSAVED_ONLY = { FR: true, France: true };
 
     /** @type {import('wme-sdk-typings').WmeSDK} */
     let sdk;
@@ -365,6 +367,12 @@
     function limitFor(country) {
         if (!country) return null;
         return HOURLY_LIMITS[country.key] ?? HOURLY_LIMITS[country.name] ?? null;
+    }
+
+    /** Vrai si la fusion ne doit toucher que des segments non enregistrés dans le pays courant. */
+    function mergeUnsavedOnly() {
+        if (!currentCountry) return false;
+        return Boolean(MERGE_UNSAVED_ONLY[currentCountry.key] ?? MERGE_UNSAVED_ONLY[currentCountry.name]);
     }
 
     function toCountryInfo(country) {
@@ -1146,7 +1154,7 @@
     /**
      * Fusionne les segments reliés par un nœud « inutile » : nœud à exactement 2 segments,
      * de même type de route, même rue (nom et ville), sens compatibles, mêmes vitesses limites,
-     * même option « non bitumé » et mêmes restrictions. Retourne le nombre de segments supprimés par fusion.
+     * même option « non bitumé » et mêmes restrictions. Dans certains pays (France), limitée aux segments non enregistrés (id négatif). Retourne le nombre de segments supprimés par fusion.
      */
     async function mergeUselessNodes(targets) {
         let total = 0;
@@ -1154,13 +1162,16 @@
         // On suit donc les ids de départ, plus les ids créés par les fusions (absents de l'état initial).
         const initialVisible = new Set((await getVisibleSegments()).keys());
         const targetIds = new Set(targets.keys());
+        const unsavedOnly = mergeUnsavedOnly();
         // mergeSegments refuse les groupes de plus de 2 segments : on fusionne deux par deux,
         // puis on relit les données (les ids changent) jusqu'à ce qu'il n'y ait plus rien à fusionner.
         for (let pass = 0; pass < 20; pass++) {
             const visible = await getVisibleSegments();
             const current = new Map();
             for (const [id, seg] of visible) {
-                if (targetIds.has(id) || !initialVisible.has(id)) current.set(id, seg);
+                // Dans les pays concernés, seuls les segments non enregistrés (id négatif) peuvent être fusionnés.
+                if (unsavedOnly && id >= 0) continue;
+                if ((targetIds.has(id) || !initialVisible.has(id))) current.set(id, seg);
             }
             const n = await mergePass(current);
             if (n === 0 || quotaBlocked) break;
