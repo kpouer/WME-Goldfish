@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Goldfish
 // @namespace    https://github.com/kpouer/wme-goldfish
-// @version      0.10.0
+// @version      0.11.0
 // @description  Goldfish, a fish to help you manage Koifish
 // @description:fr  Goldfish un poisson pour vous aider à gérer Koifish
 // @description:en  Goldfish, a fish to help you manage Koifish
@@ -31,6 +31,11 @@
     const EARTH_RADIUS_M = 6371008.8;
     const DP_EPSILON_M = 1;        // tolérance Douglas-Peucker en mètres
     const PREFS_KEY = `${SCRIPT_ID}-prefs`;
+    const QUOTA_KEY = `${SCRIPT_ID}-quota`;
+    const QUOTA_WINDOW_MS = 60 * 60 * 1000;  // fenêtre glissante d'une heure
+    const QUOTA_DISPLAY_MS = 30 * 1000;      // rafraîchissement de l'affichage (les éditions sortent de la fenêtre)
+    // Plafond d'éditions scriptées par heure, par pays (clé : code pays WME, ou nom). Charte France §3.3 : 500/h.
+    const HOURLY_LIMITS = { FR: 500, France: 500 };
 
     /** @type {import('wme-sdk-typings').WmeSDK} */
     let sdk;
@@ -46,6 +51,15 @@
     let refreshTimer = null;
     let refreshing = false;
     let refreshAgain = false;
+    let quotaLabel;
+    /** Pays courant : { key, label, name } (null si inconnu). */
+    let currentCountry = null;
+    /** Éditions scriptées non enregistrées : clé de pays -> Set de clés d'objets (un objet compte une fois). */
+    const pendingEdits = new Map();
+    /** Vrai quand le plafond a interrompu l'exécution en cours. */
+    let quotaBlocked = false;
+    /** Vrai pendant l'exécution de Clean : les éditions réservées ne sont pas encore toutes écrites. */
+    let cleanRunning = false;
 
     /** Ids des segments touchés depuis le dernier enregistrement (le SDK n'expose pas d'état "modifié"). */
     const editedIds = new Set();
@@ -73,6 +87,9 @@
             geometry: 'Simplifier la géométrie (points de forme, nœuds inutiles)',
             mergeFailed: (msg) => `Goldfish : fusion impossible (${msg})`,
             simplified: (s, m) => `Goldfish : ${s} segment(s) simplifié(s), ${m} nœud(s) inutile(s) supprimé(s)`,
+            quotaTitle: (name, used, limit, pending) => `${name} : ${used}/${limit} éditions scriptées sur la dernière heure (dont ${pending} en attente d'enregistrement)`,
+            quotaCountry: (name) => `Pays : ${name} (pas de plafond d'éditions scriptées)`,
+            quotaReached: (name, limit) => `Goldfish : plafond de ${limit} éditions scriptées par heure atteint (${name}), actions interrompues`,
         },
         en: {
             tabDesc: () => `Goldfish, a fish to help you manage Koifish`,
@@ -89,6 +106,9 @@
             geometry: 'Simplify geometry (shape points, useless nodes)',
             mergeFailed: (msg) => `Goldfish: merge failed (${msg})`,
             simplified: (s, m) => `Goldfish: ${s} segment(s) simplified, ${m} useless node(s) removed`,
+            quotaTitle: (name, used, limit, pending) => `${name}: ${used}/${limit} scripted edits in the last hour (${pending} pending save)`,
+            quotaCountry: (name) => `Country: ${name} (no scripted-edit limit)`,
+            quotaReached: (name, limit) => `Goldfish: hourly limit of ${limit} scripted edits reached (${name}), actions stopped`,
         },
     };
     let lang = 'en';
@@ -141,6 +161,9 @@
         await registerScriptTab();
         createToolbar();
         registerEvents();
+        // Affichage seulement : les éditions anciennes sortent de la fenêtre d'une heure, ou un autre onglet les a enregistrées.
+        setInterval(updateQuotaLabel, QUOTA_DISPLAY_MS);
+        window.addEventListener('storage', (e) => e.key === QUOTA_KEY && updateQuotaLabel());
         await refresh();
         console.log(`[${SCRIPT_ID}] chargé`);
     }
@@ -269,6 +292,123 @@
         }
     }
 
+    // ------------------------------------------------------------ quota
+
+    /** Journal des éditions enregistrées : { [pays]: [[horodatage, nombre], ...] }, relu à chaque accès (partagé entre onglets). */
+    function loadQuota() {
+        let data = {};
+        try {
+            data = JSON.parse(localStorage.getItem(QUOTA_KEY)) ?? {};
+        } catch (e) { /* journal illisible : on repart de zéro */ }
+        const since = Date.now() - QUOTA_WINDOW_MS;
+        const clean = {};
+        for (const [key, entries] of Object.entries(data)) {
+            if (!Array.isArray(entries)) continue;
+            const recent = entries.filter((e) => Array.isArray(e) && e[0] > since && e[1] > 0);
+            if (recent.length) clean[key] = recent;
+        }
+        return clean;
+    }
+
+    function saveQuota(data) {
+        try {
+            localStorage.setItem(QUOTA_KEY, JSON.stringify(data));
+        } catch (e) {
+            // stockage indisponible : le compteur ne survivra pas au rechargement
+        }
+    }
+
+    /** Éditions enregistrées sur la dernière heure pour ce pays. */
+    function committedCount(key) {
+        return (loadQuota()[key] ?? []).reduce((sum, [, n]) => sum + n, 0);
+    }
+
+    function pendingCount(key) {
+        return pendingEdits.get(key)?.size ?? 0;
+    }
+
+    /** Plafond horaire du pays (null : pas de plafond). */
+    function limitFor(country) {
+        if (!country) return null;
+        return HOURLY_LIMITS[country.key] ?? HOURLY_LIMITS[country.name] ?? null;
+    }
+
+    function toCountryInfo(country) {
+        const name = country.name ?? String(country.id);
+        const key = country.abbr ?? name;
+        return { key, label: key, name };
+    }
+
+    async function refreshCountry() {
+        try {
+            const country = await sdk.DataModel.Countries.getTopCountry();
+            currentCountry = country ? toCountryInfo(country) : null;
+        } catch (e) {
+            currentCountry = null;
+        }
+    }
+
+    /**
+     * Réserve des éditions (clés d'objets) avant d'écrire. Retourne false, sans rien réserver, si le plafond
+     * horaire du pays serait dépassé. Un objet déjà modifié en attente d'enregistrement ne compte qu'une fois.
+     */
+    function reserveEdits(keys) {
+        if (!currentCountry || quotaBlocked) return !quotaBlocked;
+        const pending = pendingEdits.get(currentCountry.key) ?? new Set();
+        const fresh = keys.filter((k) => !pending.has(k));
+        const limit = limitFor(currentCountry);
+        if (limit != null && committedCount(currentCountry.key) + pending.size + fresh.length > limit) {
+            quotaBlocked = true;
+            showToast(t('quotaReached', currentCountry.name, limit), 6000);
+            updateQuotaLabel();
+            return false;
+        }
+        for (const k of fresh) pending.add(k);
+        pendingEdits.set(currentCountry.key, pending);
+        updateQuotaLabel();
+        return true;
+    }
+
+    /**
+     * Les éditions en attente passent dans le journal à l'enregistrement (la charte les compte à ce moment-là).
+     * Appelé aussi quand plus aucune modification n'est en attente : par prudence on les compte alors comme
+     * enregistrées (un « tout annuler » les compte donc à tort, ce qui reste du côté sûr).
+     */
+    function commitPendingEdits() {
+        if (pendingEdits.size === 0) return;
+        const data = loadQuota();
+        const now = Date.now();
+        for (const [key, keys] of pendingEdits) {
+            if (keys.size === 0) continue;
+            (data[key] ??= []).push([now, keys.size]);
+        }
+        pendingEdits.clear();
+        saveQuota(data);
+        updateQuotaLabel();
+    }
+
+    /** Pays courant et compteur de la dernière heure dans la toolbar (compteur seulement si le pays a un plafond). */
+    function updateQuotaLabel() {
+        if (!quotaLabel) return;
+        if (!currentCountry) {
+            quotaLabel.textContent = '';
+            quotaLabel.title = '';
+            return;
+        }
+        const limit = limitFor(currentCountry);
+        if (limit == null) {
+            quotaLabel.textContent = currentCountry.label;
+            quotaLabel.style.color = '#888';
+            quotaLabel.title = t('quotaCountry', currentCountry.name);
+            return;
+        }
+        const pending = pendingCount(currentCountry.key);
+        const used = committedCount(currentCountry.key) + pending;
+        quotaLabel.textContent = `${currentCountry.label} ${used}/${limit}`;
+        quotaLabel.style.color = used >= limit ? '#c62828' : used >= limit * 0.8 ? '#e65100' : '#555';
+        quotaLabel.title = t('quotaTitle', currentCountry.name, used, limit, pending);
+    }
+
     // ----------------------------------------------------------- toolbar
 
     const BTN_STYLE = {
@@ -326,7 +466,9 @@
         fishIcon.src = FISH_ICON_URL;
         fishIcon.alt = 'Goldfish';
         Object.assign(fishIcon.style, { width: '20px', height: '20px', verticalAlign: 'middle' });
-        cleanButton.append(fishIcon, countLabel);
+        quotaLabel = document.createElement('span');
+        Object.assign(quotaLabel.style, { marginLeft: '6px', font: '11px sans-serif' });
+        cleanButton.append(fishIcon, countLabel, quotaLabel);
 
         toggleButton = document.createElement('button');
         Object.assign(toggleButton.style, BTN_STYLE, { padding: '0 6px', borderLeft: '1px solid #e0e0e0' });
@@ -507,6 +649,7 @@
         countLabel.style.color = '#c2185b';
         countLabel.style.fontWeight = 'bold';
         cleanButton.title = n === 0 ? t('cleanTitle') : t('cleanTitleCount', n);
+        updateQuotaLabel();
     }
 
     // ------------------------------------------------------- suppression
@@ -516,6 +659,8 @@
         const targets = await findShortSegments();
         let deleted = 0;
         for (const { id } of targets) {
+            // Un segment non enregistré (id négatif) n'existe pas côté serveur : sa suppression ne compte pas.
+            if (id >= 0 && !reserveEdits([`s${id}`])) break;
             try {
                 await sdk.DataModel.Segments.deleteSegment({ segmentId: id });
                 deleted++;
@@ -557,6 +702,7 @@
             try {
                 const segment = await sdk.DataModel.Segments.getById({ segmentId: id });
                 if (segment?.primaryStreetId !== streetId) {
+                    if (!reserveEdits([`s${id}`])) break;
                     await sdk.DataModel.Segments.updateAddress({ segmentId: id, addressData: { primaryStreetId: streetId } });
                 }
                 cleaned++;
@@ -582,6 +728,7 @@
         const ids = await getNewOrSelectedIds();
         let done = 0;
         for (const id of ids) {
+            if (quotaBlocked) break;
             try {
                 const segment = await sdk.DataModel.Segments.getById({ segmentId: id });
                 if (segment && (await apply(segment, id)) !== false) done++;
@@ -596,6 +743,7 @@
         // updateSegment échoue (InvalidStateError) quand rien ne change : on l'évite.
         return updateNewOrSelected('type Street', async (segment, id) => {
             if (segment.roadType === STREET_ROAD_TYPE) return false;
+            if (!reserveEdits([`s${id}`])) return false;
             await sdk.DataModel.Segments.updateSegment({ segmentId: id, roadType: STREET_ROAD_TYPE });
         });
     }
@@ -603,6 +751,7 @@
     function removeUnpaved() {
         return updateNewOrSelected('non bitumé', async (segment, id) => {
             if (!segment.flagAttributes?.unpaved) return false;
+            if (!reserveEdits([`s${id}`])) return false;
             await sdk.DataModel.Segments.updateSegment({ segmentId: id, flagAttributes: { unpaved: false } });
         });
     }
@@ -610,6 +759,7 @@
     function setTwoWay() {
         return updateNewOrSelected('double sens', async (segment, id) => {
             if (segment.isTwoWay) return false;
+            if (!reserveEdits([`s${id}`])) return false;
             await sdk.DataModel.Segments.updateDirection({ segmentId: id, direction: 'TWO_WAY' });
         });
     }
@@ -619,6 +769,11 @@
         cleanButton.disabled = true;
         cleanButton.style.opacity = '0.5'; // exécution en cours
         cleanButton.style.transform = 'none';
+        // Pays de l'action (plafond horaire) : relu au lancement, la carte a pu bouger.
+        quotaBlocked = false;
+        cleanRunning = true;
+        await refreshCountry();
+        updateQuotaLabel();
         const steps = [
             ['delete', deleteShortSegments],
             ['clean', cleanNewSegments],
@@ -630,6 +785,7 @@
         try {
             for (const [key, fn] of steps) {
                 if (!checkboxes[key].checked) continue;
+                if (quotaBlocked) break; // plafond atteint : on n'enchaîne pas les étapes suivantes
                 try {
                     await fn();
                 } catch (e) {
@@ -637,6 +793,7 @@
                 }
             }
         } finally {
+            cleanRunning = false;
             cleanButton.blur();
             cleanButton.disabled = false;
             cleanButton.style.opacity = '1';
@@ -783,7 +940,7 @@
                 if (targetIds.has(id) || !initialVisible.has(id)) current.set(id, seg);
             }
             const n = await mergePass(current);
-            if (n === 0) break;
+            if (n === 0 || quotaBlocked) break;
             total += n;
         }
         return total;
@@ -830,6 +987,8 @@
 
         let merged = 0;
         for (const ids of pairs) {
+            // Une fusion touche les deux segments d'origine et en crée un nouveau (clé fictive : son id est inconnu).
+            if (!reserveEdits([...ids.map((id) => `s${id}`), `merge-${Date.now()}-${merged}`])) break;
             try {
                 await sdk.DataModel.Segments.mergeSegments({ segmentIds: ids });
                 merged++;
@@ -853,6 +1012,7 @@
                 const coords = segment.geometry.coordinates;
                 const simplified = douglasPeucker(coords, DP_EPSILON_M);
                 if (simplified.length === coords.length) continue;
+                if (!reserveEdits([`s${id}`])) break;
                 try {
                     await sdk.DataModel.Segments.updateSegment({
                         segmentId: id,
@@ -883,6 +1043,9 @@
         try {
             do {
                 refreshAgain = false;
+                await refreshCountry();
+                // Plus aucune modification en attente : les éditions scriptées sont enregistrées (ou annulées).
+                if (!cleanRunning && await sdk.Editing.getUnsavedChangesCount() === 0) commitPendingEdits();
                 shortSegments = await findShortSegments();
                 unconnectedNodes = await findUnconnectedNodes();
                 await drawHighlights();
@@ -934,6 +1097,7 @@
             eventHandler: ({ dataModelName }) => {
                 if (dataModelName !== 'segments') return;
                 editedIds.clear();
+                commitPendingEdits();
                 scheduleRefresh();
             },
         });
