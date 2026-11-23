@@ -1145,7 +1145,8 @@
 
     /**
      * Fusionne les segments reliés par un nœud « inutile » : nœud à exactement 2 segments,
-     * de même type de route, même rue et sens compatibles. Retourne le nombre de segments supprimés par fusion.
+     * de même type de route, même rue (nom et ville), sens compatibles, mêmes vitesses limites,
+     * même option « non bitumé » et mêmes restrictions. Retourne le nombre de segments supprimés par fusion.
      */
     async function mergeUselessNodes(targets) {
         let total = 0;
@@ -1200,6 +1201,13 @@
                 if (a.roadType !== b.roadType || a.primaryStreetId !== b.primaryStreetId) continue;
                 if (Boolean(a.isTwoWay) !== Boolean(b.isTwoWay)) continue;
                 if (!a.isTwoWay && dirAt(a, nodeId) === dirAt(b, nodeId)) continue; // sens uniques incompatibles
+                if (Boolean(a.flagAttributes?.unpaved) !== Boolean(b.flagAttributes?.unpaved)) continue;
+                if (JSON.stringify(a.restrictions ?? []) !== JSON.stringify(b.restrictions ?? [])) continue;
+                // Vitesses limites : comparées dans chaque sens de circulation à travers le nœud.
+                const speedIn = (s) => (nodeId === s.toNodeId ? s.fwdSpeedLimit : s.revSpeedLimit);
+                const speedOut = (s) => (nodeId === s.fromNodeId ? s.fwdSpeedLimit : s.revSpeedLimit);
+                if ((speedIn(a) ?? null) !== (speedOut(b) ?? null)) continue;
+                if ((speedOut(a) ?? null) !== (speedIn(b) ?? null)) continue;
                 if (a.fromNodeId === b.fromNodeId && a.toNodeId === b.toNodeId) continue; // boucle
                 used.add(a.id);
                 used.add(b.id);
