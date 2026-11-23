@@ -107,7 +107,7 @@
             logTwoWay: (n) => `${n} segment(s) passé(s) en double sens`,
             logMerge: (n) => `${n} fusion(s) de segments (nœuds inutiles)`,
             logGeometry: (n, p) => `${n} segment(s) simplifié(s) (${p} point(s) de forme retiré(s))`,
-            quotaTitle: (name, used, limit, pending) => `${name} : ${used}/${limit} éditions scriptées sur la dernière heure (dont ${pending} en attente d'enregistrement)`,
+            quotaTitle: (name, used, limit, pending) => `${name} : ${used}/${limit} éditions scriptées sur la dernière heure (+ ${pending} en attente d'enregistrement)`,
             quotaCountry: (name) => `Pays : ${name} (pas de plafond d'éditions scriptées)`,
             quotaReached: (name, limit) => `Goldfish : plafond de ${limit} éditions scriptées par heure atteint (${name}), actions interrompues`,
         },
@@ -141,7 +141,7 @@
             logTwoWay: (n) => `${n} segment(s) set to two-way`,
             logMerge: (n) => `${n} segment merge(s) (useless nodes)`,
             logGeometry: (n, p) => `${n} segment(s) simplified (${p} shape point(s) removed)`,
-            quotaTitle: (name, used, limit, pending) => `${name}: ${used}/${limit} scripted edits in the last hour (${pending} pending save)`,
+            quotaTitle: (name, used, limit, pending) => `${name}: ${used}/${limit} scripted edits in the last hour (+ ${pending} pending save)`,
             quotaCountry: (name) => `Country: ${name} (no scripted-edit limit)`,
             quotaReached: (name, limit) => `Goldfish: hourly limit of ${limit} scripted edits reached (${name}), actions stopped`,
         },
@@ -403,11 +403,14 @@
         return true;
     }
 
-    /**
-     * Les éditions en attente passent dans le journal à l'enregistrement (la charte les compte à ce moment-là).
-     * Appelé aussi quand plus aucune modification n'est en attente : par prudence on les compte alors comme
-     * enregistrées (un « tout annuler » les compte donc à tort, ce qui reste du côté sûr).
-     */
+    /** Abandonne les réservations en attente (modifications toutes annulées sans enregistrement). */
+    function discardPendingEdits() {
+        if (pendingEdits.size === 0) return;
+        pendingEdits.clear();
+        updateQuotaLabel();
+    }
+
+    /** Les éditions en attente passent dans le journal à l'enregistrement uniquement (la charte les compte à ce moment-là). */
     function commitPendingEdits() {
         if (pendingEdits.size === 0) return;
         const data = loadQuota();
@@ -437,9 +440,12 @@
             return;
         }
         const pending = pendingCount(currentCountry.key);
-        const used = committedCount(currentCountry.key) + pending;
+        // Le compteur affiché n'inclut que les éditions enregistrées ; les réservations en attente restent
+        // comptées pour le plafond (reserveEdits) et sont indiquées dans l'infobulle.
+        const used = committedCount(currentCountry.key);
         quotaLabel.textContent = `${currentCountry.label} ${used}/${limit}`;
-        quotaLabel.style.color = used >= limit ? '#c62828' : used >= limit * 0.8 ? '#e65100' : '#555';
+        const total = used + pending;
+        quotaLabel.style.color = total >= limit ? '#c62828' : total >= limit * 0.8 ? '#e65100' : '#555';
         quotaLabel.title = t('quotaTitle', currentCountry.name, used, limit, pending);
     }
 
@@ -1259,8 +1265,8 @@
             do {
                 refreshAgain = false;
                 await refreshCountry();
-                // Plus aucune modification en attente : les éditions scriptées sont enregistrées (ou annulées).
-                if (!cleanRunning && await sdk.Editing.getUnsavedChangesCount() === 0) commitPendingEdits();
+                // Plus aucune modification en attente sans enregistrement : tout a été annulé, rien à compter.
+                if (!cleanRunning && await sdk.Editing.getUnsavedChangesCount() === 0) discardPendingEdits();
                 shortSegments = await findShortSegments();
                 unconnectedNodes = await findUnconnectedNodes();
                 await drawHighlights();
