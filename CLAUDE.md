@@ -26,6 +26,10 @@ Coordinates are GeoJSON `[lon, lat]` WGS84 throughout.
 
 Lorsque le script édite en France, il doit respecter la charte d'édition de la communauté française sur les scripts et l'édition de masse : https://www.waze.com/discuss/t/scripts-et-edition-de-masse-la-doctrine-de-la-communaute-france/414279. Toute nouvelle action d'édition (ou modification d'une action existante) doit être vérifiée au regard de cette doctrine avant d'être ajoutée.
 
+### Plafond d'éditions scriptées (§3.3)
+
+`HOURLY_LIMITS` donne le plafond par pays (France : 500 par heure glissante). Toute écriture passe par `reserveEdits(clés)` avant l'appel SDK ; un refus positionne `quotaBlocked`, affiche un toast et interrompt les étapes de `runClean`. Un objet compte une fois par enregistrement (clé `s<id>`). Les éditions réservées restent en attente (`pendingEdits`), puis passent dans le journal `wme-goldfish-quota` (localStorage, par pays, horodaté, relu à chaque accès donc partagé entre onglets) à l'enregistrement. Toute nouvelle écriture doit appeler `reserveEdits`. Le pays vient de `Countries.getTopCountry()` (`refreshCountry`) et s'affiche dans la toolbar avec le compteur si le pays est plafonné.
+
 ## Piste abandonnée : relier des nœuds superposés
 
 Cas visé : deux segments dont les extrémités sont à 0,00 m l'une de l'autre mais portent deux nœuds distincts (`fromNodeId`/`toNodeId` différents). L'étape `connectCloseNodes` (tolérance 0,5 m) devait les relier avant `simplifySelection` (fusion des segments de même type et même nom reliés par un nœud à exactement 2 segments, union-find + `mergeSegments`), qui les ignore sinon (nœud relié à 1 seul segment). Les deux étapes ont été retirées, faute de méthode SDK qui relie vraiment deux nœuds :
