@@ -1,8 +1,10 @@
 // ==UserScript==
-// @name         WME Goldfish - Segments < 1m
+// @name         WME Goldfish
 // @namespace    https://github.com/kpouer/wme-goldfish
-// @version      0.6.0
-// @description  Met en surbrillance les segments en cours de modification qui font moins de 1 m et permet de les nettoyer depuis un bouton de la toolbar.
+// @version      0.10.0
+// @description  Goldfish, a fish to help you manage Koifish
+// @description:fr  Goldfish un poisson pour vous aider à gérer Koifish
+// @description:en  Goldfish, a fish to help you manage Koifish
 // @author       kpouer
 // @match        https://www.waze.com/editor*
 // @match        https://www.waze.com/*/editor*
@@ -12,15 +14,17 @@
 // @grant        none
 // ==/UserScript==
 
-/* global getWmeSdk */
+/* global getWmeSdk, GM_info */
 
 (function () {
     'use strict';
 
     const SCRIPT_ID = 'wme-goldfish';
     const SCRIPT_NAME = 'Goldfish';
+    const SCRIPT_VERSION = typeof GM_info !== 'undefined' ? GM_info.script.version : '?';
     const LAYER_NAME = 'goldfish-short-segments';
     const UNCONNECTED_LAYER_NAME = 'goldfish-unconnected-segments';
+    const NEAR_DISTANCE_M = 20;    // un nœud non connecté n'est signalé que si un segment est plus proche
     const MAX_LENGTH_M = 1;        // segments strictement inférieurs à 1 m
     const REFRESH_DELAY_MS = 250;  // debounce du rafraîchissement
     const STREET_ROAD_TYPE = 1;    // id WME du type "Street"
@@ -52,12 +56,62 @@
 
     // ---------------------------------------------------------------- init
 
+    // ------------------------------------------------------------- i18n
+    const MESSAGES = {
+        fr: {
+            tabDesc: () => `Goldfish, un poisson pour vous aider à gérer Koifish`,
+            grip: 'Déplacer (double-clic : réinitialiser)',
+            optHide: 'Masquer les options',
+            optShow: 'Options',
+            cleanTitle: 'Clean : exécute les actions cochées',
+            cleanTitleCount: (n) => `Clean : exécute les actions cochées (${n} segment${n > 1 ? 's' : ''} < ${MAX_LENGTH_M} m)`,
+            delete: `Supprimer les segments < ${MAX_LENGTH_M} m`,
+            clean: 'Nettoyer les nouveaux segments et la sélection (sans nom, sans ville)',
+            roadType: 'Type Street (segments non enregistrés et sélection)',
+            unpaved: 'Retirer « non bitumé » (segments non enregistrés et sélection)',
+            twoWay: 'Double sens (segments non enregistrés et sélection)',
+            geometry: 'Simplifier la géométrie (points de forme, nœuds inutiles)',
+            mergeFailed: (msg) => `Goldfish : fusion impossible (${msg})`,
+            simplified: (s, m) => `Goldfish : ${s} segment(s) simplifié(s), ${m} nœud(s) inutile(s) supprimé(s)`,
+        },
+        en: {
+            tabDesc: () => `Goldfish, a fish to help you manage Koifish`,
+            grip: 'Move (double-click: reset)',
+            optHide: 'Hide options',
+            optShow: 'Options',
+            cleanTitle: 'Clean: runs the checked actions',
+            cleanTitleCount: (n) => `Clean: runs the checked actions (${n} segment${n > 1 ? 's' : ''} < ${MAX_LENGTH_M} m)`,
+            delete: `Delete segments < ${MAX_LENGTH_M} m`,
+            clean: 'Clean new segments and the selection (no name, no city)',
+            roadType: 'Street type (unsaved segments and selection)',
+            unpaved: 'Remove "unpaved" (unsaved segments and selection)',
+            twoWay: 'Two-way (unsaved segments and selection)',
+            geometry: 'Simplify geometry (shape points, useless nodes)',
+            mergeFailed: (msg) => `Goldfish: merge failed (${msg})`,
+            simplified: (s, m) => `Goldfish: ${s} segment(s) simplified, ${m} useless node(s) removed`,
+        },
+    };
+    let lang = 'en';
+    /** Texte traduit (langue de WME, anglais par défaut). */
+    function t(key, ...args) {
+        const v = MESSAGES[lang][key] ?? MESSAGES.en[key];
+        return typeof v === 'function' ? v(...args) : v;
+    }
+    /** Choisit la langue selon la locale de WME (repli : langue du navigateur). */
+    function detectLang() {
+        let code = '';
+        try { code = sdk.Settings.getLocale()?.localeCode ?? ''; } catch (e) { /* repli ci-dessous */ }
+        code = (code || document.documentElement.lang || navigator.language || '').toLowerCase();
+        lang = code.startsWith('fr') ? 'fr' : 'en';
+    }
+
     window.SDK_INITIALIZED.then(() => {
         sdk = getWmeSdk({ scriptId: SCRIPT_ID, scriptName: SCRIPT_NAME, mode: 'async' });
         sdk.Events.once({ eventName: 'wme-ready' }).then(init);
     });
 
     async function init() {
+        detectLang();
         await sdk.Map.addLayer({
             layerName: LAYER_NAME,
             styleRules: [{
@@ -84,10 +138,31 @@
                 },
             }],
         });
+        await registerScriptTab();
         createToolbar();
         registerEvents();
         await refresh();
         console.log(`[${SCRIPT_ID}] chargé`);
+    }
+
+    /** Onglet « Scripts » de WME : nom et version du script. */
+    async function registerScriptTab() {
+        try {
+            const { tabLabel, tabPane } = await sdk.Sidebar.registerScriptTab();
+            const tabIcon = document.createElement('img');
+            tabIcon.src = FISH_ICON_URL;
+            tabIcon.alt = '';
+            Object.assign(tabIcon.style, { width: '16px', height: '16px', verticalAlign: 'middle', marginRight: '4px' });
+            tabLabel.append(tabIcon, SCRIPT_NAME);
+            tabLabel.title = `${SCRIPT_NAME} v${SCRIPT_VERSION}`;
+            const title = document.createElement('h4');
+            title.textContent = `${SCRIPT_NAME} v${SCRIPT_VERSION}`;
+            const desc = document.createElement('p');
+            desc.textContent = t('tabDesc', MAX_LENGTH_M);
+            tabPane.append(title, desc);
+        } catch (e) {
+            console.warn(`[${SCRIPT_ID}] impossible d'enregistrer l'onglet Scripts`, e);
+        }
     }
 
     // --------------------------------------------------------- détection
@@ -131,17 +206,39 @@
         return result;
     }
 
-    /** Nœuds des nouveaux segments (id négatif) qui ne sont reliés à aucun autre segment. */
+    /** Vrai si un segment autre que `ownIds` passe à moins de NEAR_DISTANCE_M de `point` ([lon, lat]). */
+    function hasSegmentNearby(point, allSegments, ownIds) {
+        const rad = Math.PI / 180;
+        const cos = Math.cos(point[1] * rad);
+        const proj = ([lon, lat]) => ({
+            x: (lon - point[0]) * rad * cos * EARTH_RADIUS_M,
+            y: (lat - point[1]) * rad * EARTH_RADIUS_M,
+        });
+        const origin = { x: 0, y: 0 };
+        for (const seg of allSegments) {
+            if (ownIds.has(seg.id)) continue;
+            const c = seg.geometry.coordinates;
+            for (let i = 1; i < c.length; i++) {
+                if (pointToSegmentDist(origin, proj(c[i - 1]), proj(c[i])) < NEAR_DISTANCE_M) return true;
+            }
+        }
+        return false;
+    }
+
+    /** Nœuds des nouveaux segments (id négatif) non reliés à un autre segment, avec un segment à moins de 20 m. */
     async function findUnconnectedNodes() {
         const nodes = new Map();
-        for (const segment of await sdk.DataModel.Segments.getAll()) {
+        const allSegments = await sdk.DataModel.Segments.getAll();
+        for (const segment of allSegments) {
             if (segment.id >= 0) continue;
             for (const nodeId of [segment.fromNodeId, segment.toNodeId]) {
                 if (nodeId == null || nodes.has(nodeId)) continue;
                 const node = await sdk.DataModel.Nodes.getById({ nodeId });
                 if (!node) continue;
                 const others = (node.connectedSegmentIds ?? []).filter((id) => id !== segment.id);
-                if (others.length === 0) nodes.set(nodeId, node);
+                if (others.length === 0 && hasSegmentNearby(node.geometry.coordinates, allSegments, new Set([segment.id]))) {
+                    nodes.set(nodeId, node);
+                }
             }
         }
         console.log(`[${SCRIPT_ID}] noeuds non connectés : ${nodes.size}`);
@@ -183,7 +280,25 @@
         color: 'inherit',
     };
 
-    /** Bouton « split » dans la toolbar de WME : 🐟 (exécute Clean) + ▾ (ouvre les options). */
+    /** Retour visuel sur un bouton : survol et enfoncement (le bouton « bouge » au clic). */
+    function addPressFeedback(button) {
+        const set = (background, transform) => {
+            if (button.disabled) return;
+            button.style.background = background;
+            button.style.transform = transform;
+        };
+        button.style.transition = 'background 0.1s, transform 0.1s';
+        button.addEventListener('mouseenter', () => set('#eef3f8', 'none'));
+        button.addEventListener('mouseleave', () => set('transparent', 'none'));
+        button.addEventListener('pointerdown', () => set('#cfdcea', 'scale(0.9) translateY(1px)'));
+        button.addEventListener('pointerup', () => set('#eef3f8', 'none'));
+        button.addEventListener('pointercancel', () => set('transparent', 'none'));
+    }
+
+    /** Icône du poisson (SVG inline, servie en data URI pour éviter l'injection de HTML). */
+    const FISH_ICON_URL = `data:image/svg+xml;charset=utf-8,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><g fill="#F37934"><path d="M240.835,288.625c-19.528,25.107-64.51,122.453-145.4,116.873c-80.901-5.579-89.27-58.583-89.27-58.583c13.948,0,69.015,22.068,75.603-22.828c8.684-59.159,90.377-62.252,90.377-62.252c-71.131-2.79-59.039-53.905-84.949-72.347C58.974,169.408,0,199.074,0,199.074c61.503-209.497,234.181,16.781,234.181,16.781c-13.21,10.377-21.59,21.862-21.59,33.954C212.591,263.822,223.847,277.022,240.835,288.625z"/><path d="M428.437,179.378c-14.969-6.111-31.88-9.997-50.67-9.997c-23.305,0-66.008,9.52-102.632,24.89c-41.444-46.708,4.982-63.815,13.981-63.945c17.596-0.25,43.321,0,97.02-20.928C439.834,88.48,428.437,179.378,428.437,179.378z"/><path d="M429.368,367.453c-24.999,18.138-117.351,11.875-116.58-2.725c1.042-19.81,9.965-31.783,19.549-40.586c17.161,3.929,32.673,6.09,43.777,6.09c23.023,0,43.224-5.84,60.483-14.437C442.437,324.305,453.422,346.091,429.368,367.453z"/></g><path fill="#FBA026" d="M512,249.803c0,0-25.313,45.308-73.4,69.243c-17.27,8.608-37.471,14.448-60.494,14.448c-46.22,0-168.77-37.471-168.77-83.69c0-22.914,30.133-43.68,66.138-58.789c36.624-15.37,79.327-24.89,102.632-24.89c18.79,0,35.701,3.886,50.67,9.997C483.235,198.319,512,249.803,512,249.803z"/><g fill="#F37934"><path d="M512,249.803c0,0-25.313,45.308-73.4,69.243h-0.011c-12.841-7.077-36.602-28.515-36.602-69.243s16.89-63.023,26.79-73.682C483.235,198.319,512,249.803,512,249.803z"/><path d="M363.809,226.055c-11.89,0-21.528-9.639-21.528-21.528c0-11.89,9.639-21.528,21.528-21.528V226.055z"/><path d="M363.809,269.113c-11.89,0-21.528-9.639-21.528-21.528c0-11.89,9.639-21.528,21.528-21.528V269.113z"/><path d="M363.809,312.169c-11.89,0-21.528-9.639-21.528-21.528c0-11.89,9.639-21.528,21.528-21.528V312.169z"/><path d="M304.107,233.808c-7.608,0-13.777-6.168-13.777-13.777c0-7.609,6.168-13.777,13.777-13.777V233.808z"/><path d="M304.107,261.361c-7.608,0-13.777-6.168-13.777-13.777c0-7.608,6.168-13.777,13.777-13.777V261.361z"/><path d="M304.107,288.913c-7.608,0-13.777-6.168-13.777-13.777c0-7.608,6.168-13.777,13.777-13.777V288.913z"/></g><circle fill="#CA463D" cx="446.229" cy="238.903" r="8.684"/></svg>')}`;
+
+    /** Bouton « split » dans la toolbar de WME : poisson (exécute Clean) + ▾ (ouvre les options). */
     function createToolbar() {
         toolbar = document.createElement('div');
         toolbar.id = `${SCRIPT_ID}-toolbar`;
@@ -203,14 +318,20 @@
         cleanButton = document.createElement('button');
         Object.assign(cleanButton.style, BTN_STYLE, { padding: '0 8px' });
         cleanButton.addEventListener('click', runClean);
+        addPressFeedback(cleanButton);
 
         countLabel = document.createElement('span');
         countLabel.style.marginLeft = '4px';
-        cleanButton.append('🐟', countLabel);
+        const fishIcon = document.createElement('img');
+        fishIcon.src = FISH_ICON_URL;
+        fishIcon.alt = 'Goldfish';
+        Object.assign(fishIcon.style, { width: '20px', height: '20px', verticalAlign: 'middle' });
+        cleanButton.append(fishIcon, countLabel);
 
         toggleButton = document.createElement('button');
         Object.assign(toggleButton.style, BTN_STYLE, { padding: '0 6px', borderLeft: '1px solid #e0e0e0' });
         toggleButton.textContent = '▾';
+        addPressFeedback(toggleButton);
         toggleButton.addEventListener('click', (e) => {
             e.stopPropagation();
             setExpanded(!expanded);
@@ -219,7 +340,7 @@
         // Poignée de déplacement (double-clic : remet la barre dans la toolbar de WME).
         grip = document.createElement('span');
         grip.textContent = '⠿';
-        grip.title = 'Déplacer (double-clic : réinitialiser)';
+        grip.title = t('grip');
         Object.assign(grip.style, {
             padding: '0 4px',
             cursor: 'move',
@@ -250,14 +371,9 @@
         });
         body.addEventListener('click', (e) => e.stopPropagation());
 
-        const actionDefs = [
-            ['delete', 'Supprimer les segments < 1 m'],
-            ['clean', 'Nettoyer les nouveaux segments (sans nom, sans ville, Street)'],
-            ['simplify', 'Simplify (nœuds en trop, sélection)'],
-            ['geometry', 'Simplify geometry (points de forme, sélection)'],
-        ];
+        const actionDefs = ['delete', 'clean', 'roadType', 'unpaved', 'twoWay', 'geometry'];
         const prefs = loadPrefs();
-        for (const [key, text] of actionDefs) {
+        for (const key of actionDefs) {
             const label = document.createElement('label');
             Object.assign(label.style, { display: 'flex', alignItems: 'center', gap: '6px', margin: '3px 0', cursor: 'pointer' });
             const box = document.createElement('input');
@@ -267,7 +383,7 @@
                 savePrefs({ ...loadPrefs(), checked: Object.fromEntries(Object.entries(checkboxes).map(([k, b]) => [k, b.checked])) });
             });
             checkboxes[key] = box;
-            label.append(box, document.createTextNode(text));
+            label.append(box, document.createTextNode(t(key)));
             body.appendChild(label);
         }
         document.body.appendChild(body);
@@ -275,6 +391,14 @@
         // Clic ailleurs : on referme les options.
         document.addEventListener('click', () => setExpanded(false));
         window.addEventListener('resize', () => expanded && positionOptions());
+
+        // Rend le focus à la carte après un clic : un bouton ou une case qui garde le focus bloque les raccourcis de WME.
+        const releaseFocus = () => {
+            const active = document.activeElement;
+            if (active && active !== document.body && toolbar.contains(active)) active.blur();
+        };
+        toolbar.addEventListener('click', () => setTimeout(releaseFocus, 0));
+        toolbar.addEventListener('change', releaseFocus);
 
         const { left, top } = loadPrefs();
         if (left != null && top != null) {
@@ -373,7 +497,7 @@
         expanded = value;
         body.style.display = expanded ? 'block' : 'none';
         toggleButton.textContent = expanded ? '▴' : '▾';
-        toggleButton.title = expanded ? 'Masquer les options' : 'Options';
+        toggleButton.title = expanded ? t('optHide') : t('optShow');
         if (expanded) positionOptions();
     }
 
@@ -382,9 +506,7 @@
         countLabel.textContent = n === 0 ? '' : String(n);
         countLabel.style.color = '#c2185b';
         countLabel.style.fontWeight = 'bold';
-        cleanButton.title = n === 0
-            ? 'Clean : exécute les actions cochées'
-            : `Clean : exécute les actions cochées (${n} segment${n > 1 ? 's' : ''} < 1 m)`;
+        cleanButton.title = n === 0 ? t('cleanTitle') : t('cleanTitleCount', n);
     }
 
     // ------------------------------------------------------- suppression
@@ -418,14 +540,25 @@
     }
 
     async function cleanNewSegments() {
-        const targets = (await sdk.DataModel.Segments.getAll()).filter((s) => s.id < 0);
-        if (targets.length === 0) return;
+        // Nouveaux segments + segments sélectionnés (jamais tous les segments visibles).
+        const ids = new Set((await sdk.DataModel.Segments.getAll()).filter((s) => s.id < 0).map((s) => s.id));
+        const selection = await sdk.Editing.getSelection();
+        if (selection && String(selection.objectType).toLowerCase() === 'segment') {
+            for (const id of selection.ids ?? []) ids.add(id);
+        }
+        const targets = [...ids].map((id) => ({ id }));
+        if (targets.length === 0) {
+            console.log(`[${SCRIPT_ID}] clean : aucun segment nouveau ou sélectionné`);
+            return;
+        }
         const streetId = await getEmptyStreetId();
         let cleaned = 0;
         for (const { id } of targets) {
             try {
-                await sdk.DataModel.Segments.updateAddress({ segmentId: id, primaryStreetId: streetId });
-                await sdk.DataModel.Segments.updateSegment({ segmentId: id, roadType: STREET_ROAD_TYPE });
+                const segment = await sdk.DataModel.Segments.getById({ segmentId: id });
+                if (segment?.primaryStreetId !== streetId) {
+                    await sdk.DataModel.Segments.updateAddress({ segmentId: id, addressData: { primaryStreetId: streetId } });
+                }
                 cleaned++;
             } catch (e) {
                 console.warn(`[${SCRIPT_ID}] nettoyage impossible du segment ${id}`, e);
@@ -434,13 +567,64 @@
         console.log(`[${SCRIPT_ID}] ${cleaned}/${targets.length} segment(s) nettoyé(s)`);
     }
 
+    /** Segments non enregistrés (id négatif) + segments sélectionnés. */
+    async function getNewOrSelectedIds() {
+        const ids = new Set((await sdk.DataModel.Segments.getAll()).filter((s) => s.id < 0).map((s) => s.id));
+        const selection = await sdk.Editing.getSelection();
+        if (selection && String(selection.objectType).toLowerCase() === 'segment') {
+            for (const id of selection.ids ?? []) ids.add(id);
+        }
+        return [...ids];
+    }
+
+    /** Applique `apply(segment, id)` à chaque segment ciblé ; `apply` retourne false si rien à faire. */
+    async function updateNewOrSelected(label, apply) {
+        const ids = await getNewOrSelectedIds();
+        let done = 0;
+        for (const id of ids) {
+            try {
+                const segment = await sdk.DataModel.Segments.getById({ segmentId: id });
+                if (segment && (await apply(segment, id)) !== false) done++;
+            } catch (e) {
+                console.warn(`[${SCRIPT_ID}] ${label} impossible pour le segment ${id}`, e);
+            }
+        }
+        console.log(`[${SCRIPT_ID}] ${label} : ${done}/${ids.length} segment(s) modifié(s)`);
+    }
+
+    function setRoadTypeStreet() {
+        // updateSegment échoue (InvalidStateError) quand rien ne change : on l'évite.
+        return updateNewOrSelected('type Street', async (segment, id) => {
+            if (segment.roadType === STREET_ROAD_TYPE) return false;
+            await sdk.DataModel.Segments.updateSegment({ segmentId: id, roadType: STREET_ROAD_TYPE });
+        });
+    }
+
+    function removeUnpaved() {
+        return updateNewOrSelected('non bitumé', async (segment, id) => {
+            if (!segment.flagAttributes?.unpaved) return false;
+            await sdk.DataModel.Segments.updateSegment({ segmentId: id, flagAttributes: { unpaved: false } });
+        });
+    }
+
+    function setTwoWay() {
+        return updateNewOrSelected('double sens', async (segment, id) => {
+            if (segment.isTwoWay) return false;
+            await sdk.DataModel.Segments.updateDirection({ segmentId: id, direction: 'TWO_WAY' });
+        });
+    }
+
     /** Exécute les actions cochées, dans l'ordre. */
     async function runClean() {
         cleanButton.disabled = true;
+        cleanButton.style.opacity = '0.5'; // exécution en cours
+        cleanButton.style.transform = 'none';
         const steps = [
             ['delete', deleteShortSegments],
             ['clean', cleanNewSegments],
-            ['simplify', simplifySelection],
+            ['roadType', setRoadTypeStreet],
+            ['unpaved', removeUnpaved],
+            ['twoWay', setTwoWay],
             ['geometry', simplifyGeometry],
         ];
         try {
@@ -453,83 +637,46 @@
                 }
             }
         } finally {
+            cleanButton.blur();
             cleanButton.disabled = false;
+            cleanButton.style.opacity = '1';
+            cleanButton.style.background = 'transparent';
             await refresh();
         }
     }
 
-    // --------------------------------------------------------- simplify
-
-    async function streetNameOf(segment) {
-        if (segment.primaryStreetId == null) return '';
-        const street = await sdk.DataModel.Streets.getById({ streetId: segment.primaryStreetId });
-        return street?.name ?? '';
-    }
+    // ------------------------------------------------------- cible
 
     /**
-     * Fusionne les segments sélectionnés reliés par un nœud « en trop » :
-     * nœud relié à exactement 2 segments (tous deux sélectionnés) de même type et même nom.
+     * Segments ciblés : la sélection s'il y en a une, sinon tous les segments visibles
+     * (chargés dans l'emprise courante de la carte). Retourne une Map id -> segment.
      */
-    async function simplifySelection() {
-        try {
-            const selection = sdk.Editing.getSelection();
-            if (!selection || String(selection.objectType).toLowerCase() !== 'segment') {
-                console.log(`[${SCRIPT_ID}] simplify : aucun segment sélectionné`);
-                return;
-            }
-            const selected = new Set(selection.ids);
-            const segments = new Map();
-            for (const id of selected) {
+    async function getTargetSegments() {
+        const targets = new Map();
+        const selection = await sdk.Editing.getSelection();
+        if (selection && String(selection.objectType).toLowerCase() === 'segment' && selection.ids?.length) {
+            for (const id of selection.ids) {
                 const segment = await sdk.DataModel.Segments.getById({ segmentId: id });
-                if (segment) segments.set(id, segment);
+                if (segment) targets.set(id, segment);
             }
-
-            // Union-find sur les segments à fusionner.
-            const parent = new Map([...segments.keys()].map((id) => [id, id]));
-            const find = (id) => {
-                while (parent.get(id) !== id) id = parent.get(id);
-                return id;
-            };
-
-            const checked = new Set();
-            for (const segment of segments.values()) {
-                for (const nodeId of [segment.fromNodeId, segment.toNodeId]) {
-                    if (nodeId == null || checked.has(nodeId)) continue;
-                    checked.add(nodeId);
-                    const node = await sdk.DataModel.Nodes.getById({ nodeId });
-                    const ids = node?.connectedSegmentIds ?? [];
-                    const skip = (why) => console.log(`[${SCRIPT_ID}] simplify : nœud ${nodeId} ignoré (${why})`, ids);
-                    if (ids.length !== 2 || ids[0] === ids[1]) { skip(`${ids.length} segment(s) relié(s)`); continue; }
-                    const [a, b] = ids.map((id) => segments.get(id));
-                    if (!a || !b) { skip('segment non sélectionné'); continue; } // les deux segments doivent être sélectionnés
-                    if (a.roadType !== b.roadType) { skip(`types différents ${a.roadType}/${b.roadType}`); continue; }
-                    const [na, nb] = [await streetNameOf(a), await streetNameOf(b)];
-                    if (na !== nb) { skip(`noms différents « ${na} » / « ${nb} »`); continue; }
-                    parent.set(find(a.id), find(b.id));
-                }
-            }
-
-            const groups = new Map();
-            for (const id of segments.keys()) {
-                const root = find(id);
-                if (!groups.has(root)) groups.set(root, []);
-                groups.get(root).push(id);
-            }
-
-            let merged = 0;
-            for (const segmentIds of groups.values()) {
-                if (segmentIds.length < 2) continue;
-                try {
-                    sdk.DataModel.Segments.mergeSegments({ segmentIds });
-                    merged += segmentIds.length - 1;
-                } catch (e) {
-                    console.warn(`[${SCRIPT_ID}] fusion impossible pour les segments ${segmentIds}`, e);
-                }
-            }
-            console.log(`[${SCRIPT_ID}] simplify : ${merged} nœud(s) supprimé(s)`);
-        } catch (e) {
-            console.error(`[${SCRIPT_ID}] erreur de simplification`, e);
+            return targets;
         }
+        return getVisibleSegments();
+    }
+
+    /** Tous les segments chargés dont une partie est dans l'emprise de la carte (sans tenir compte de la sélection). */
+    async function getVisibleSegments() {
+        const targets = new Map();
+        let extent = null;
+        try {
+            extent = await sdk.Map.getMapExtent(); // [minLon, minLat, maxLon, maxLat]
+        } catch (e) { /* pas d'emprise : on prend tous les segments chargés */ }
+        for (const segment of await sdk.DataModel.Segments.getAll()) {
+            if (extent && !segment.geometry.coordinates.some(([lon, lat]) =>
+                lon >= extent[0] && lon <= extent[2] && lat >= extent[1] && lat <= extent[3])) continue;
+            targets.set(segment.id, segment);
+        }
+        return targets;
     }
 
     // ----------------------------------------------- Douglas-Peucker
@@ -550,6 +697,17 @@
      * les extrémités sont toujours conservées.
      */
     function douglasPeucker(coords, epsilonM) {
+        // Une passe n'est pas idempotente (les cordes changent une fois des points retirés) :
+        // on répète jusqu'au point fixe pour qu'une nouvelle application ne change plus rien.
+        let current = coords;
+        for (;;) {
+            const next = douglasPeuckerPass(current, epsilonM);
+            if (next.length === current.length) return current;
+            current = next;
+        }
+    }
+
+    function douglasPeuckerPass(coords, epsilonM) {
         if (coords.length < 3) return coords;
         const rad = Math.PI / 180;
         const lat0 = coords[0][1] * rad;
@@ -576,18 +734,122 @@
         return coords.filter((_, i) => keep[i]);
     }
 
-    /** Réduit les points de forme des segments sélectionnés sans déplacer leurs extrémités. */
+    /** Affiche un message furtif en bas de l'écran, qui disparaît seul après `durationMs`. */
+    function showToast(text, durationMs = 2500) {
+        const toast = document.createElement('div');
+        toast.textContent = text;
+        Object.assign(toast.style, {
+            position: 'fixed', bottom: '40px', left: '50%', transform: 'translateX(-50%)',
+            zIndex: 10001, padding: '8px 16px', borderRadius: '6px',
+            background: 'rgba(0,0,0,0.8)', color: '#fff', font: '13px sans-serif',
+            pointerEvents: 'none', opacity: '0', transition: 'opacity 0.3s',
+        });
+        Object.assign(toast.style, { position: 'static', transform: 'none', margin: '4px 0' });
+        let stack = document.getElementById(`${SCRIPT_ID}-toasts`);
+        if (!stack) {
+            stack = document.createElement('div');
+            stack.id = `${SCRIPT_ID}-toasts`;
+            Object.assign(stack.style, {
+                position: 'fixed', bottom: '40px', left: '50%', transform: 'translateX(-50%)',
+                zIndex: 10001, display: 'flex', flexDirection: 'column', alignItems: 'center',
+                pointerEvents: 'none',
+            });
+            document.body.appendChild(stack);
+        }
+        stack.appendChild(toast);
+        requestAnimationFrame(() => { toast.style.opacity = '1'; });
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            setTimeout(() => toast.remove(), 300);
+        }, durationMs);
+    }
+
+    /**
+     * Fusionne les segments reliés par un nœud « inutile » : nœud à exactement 2 segments,
+     * de même type de route, même rue et sens compatibles. Retourne le nombre de segments supprimés par fusion.
+     */
+    async function mergeUselessNodes(targets) {
+        let total = 0;
+        // Cible stable d'une passe à l'autre : la sélection peut être perdue après une fusion.
+        // On suit donc les ids de départ, plus les ids créés par les fusions (absents de l'état initial).
+        const initialVisible = new Set((await getVisibleSegments()).keys());
+        const targetIds = new Set(targets.keys());
+        // mergeSegments refuse les groupes de plus de 2 segments : on fusionne deux par deux,
+        // puis on relit les données (les ids changent) jusqu'à ce qu'il n'y ait plus rien à fusionner.
+        for (let pass = 0; pass < 20; pass++) {
+            const visible = await getVisibleSegments();
+            const current = new Map();
+            for (const [id, seg] of visible) {
+                if (targetIds.has(id) || !initialVisible.has(id)) current.set(id, seg);
+            }
+            const n = await mergePass(current);
+            if (n === 0) break;
+            total += n;
+        }
+        return total;
+    }
+
+    /** Une passe : fusionne des paires de segments disjointes. Retourne le nombre de fusions réussies. */
+    async function mergePass(segments) {
+        const known = new Map(segments);
+        const getSeg = async (id) => {
+            if (!known.has(id)) known.set(id, await sdk.DataModel.Segments.getById({ segmentId: id }));
+            return known.get(id);
+        };
+
+        // Sens du segment vu depuis un nœud : 'both', 'in' (arrive au nœud) ou 'out' (part du nœud).
+        const dirAt = (seg, nodeId) => {
+            if (seg.isTwoWay) return 'both';
+            const toward = nodeId === seg.toNodeId;
+            return seg.isAtoB === toward ? 'in' : 'out';
+        };
+
+        const pairs = [];
+        const used = new Set();
+        const seen = new Set();
+        for (const segment of segments.values()) {
+            for (const nodeId of [segment.fromNodeId, segment.toNodeId]) {
+                if (nodeId == null || seen.has(nodeId)) continue;
+                seen.add(nodeId);
+                const node = await sdk.DataModel.Nodes.getById({ nodeId });
+                const ids = node?.connectedSegmentIds ?? [];
+                if (ids.length !== 2) continue;
+                if (!ids.every((id) => segments.has(id))) continue; // les deux segments doivent être dans la cible
+                if (ids.some((id) => used.has(id))) continue;
+                const [a, b] = await Promise.all(ids.map(getSeg));
+                if (!a || !b || a.id === b.id) continue;
+                if (a.roadType !== b.roadType || a.primaryStreetId !== b.primaryStreetId) continue;
+                if (Boolean(a.isTwoWay) !== Boolean(b.isTwoWay)) continue;
+                if (!a.isTwoWay && dirAt(a, nodeId) === dirAt(b, nodeId)) continue; // sens uniques incompatibles
+                if (a.fromNodeId === b.fromNodeId && a.toNodeId === b.toNodeId) continue; // boucle
+                used.add(a.id);
+                used.add(b.id);
+                pairs.push([a.id, b.id]);
+            }
+        }
+
+        let merged = 0;
+        for (const ids of pairs) {
+            try {
+                await sdk.DataModel.Segments.mergeSegments({ segmentIds: ids });
+                merged++;
+            } catch (e) {
+                console.warn(`[${SCRIPT_ID}] fusion impossible des segments ${ids.join(', ')}`, e);
+                showToast(t('mergeFailed', e?.message ?? e), 6000);
+            }
+        }
+        return merged;
+    }
+
+    /** Réduit les points de forme des segments ciblés (sélection, sinon visibles) sans déplacer leurs extrémités. */
     async function simplifyGeometry() {
         try {
-            const selection = sdk.Editing.getSelection();
-            if (!selection || String(selection.objectType).toLowerCase() !== 'segment') {
-                console.log(`[${SCRIPT_ID}] simplify geometry : aucun segment sélectionné`);
-                return;
-            }
+            let segments = await getTargetSegments();
+            const merged = await mergeUselessNodes(segments);
+            if (merged > 0) segments = await getTargetSegments(); // les ids ont changé après fusion
             let removed = 0;
-            for (const id of selection.ids) {
-                const segment = await sdk.DataModel.Segments.getById({ segmentId: id });
-                if (!segment) continue;
+            let simplifiedCount = 0;
+            for (const [id, segment] of segments) {
                 const coords = segment.geometry.coordinates;
                 const simplified = douglasPeucker(coords, DP_EPSILON_M);
                 if (simplified.length === coords.length) continue;
@@ -597,11 +859,13 @@
                         geometry: { type: 'LineString', coordinates: simplified },
                     });
                     removed += coords.length - simplified.length;
+                    simplifiedCount++;
                 } catch (e) {
                     console.warn(`[${SCRIPT_ID}] simplification impossible du segment ${id}`, e);
                 }
             }
-            console.log(`[${SCRIPT_ID}] simplify geometry : ${removed} point(s) de forme supprimé(s)`);
+            console.log(`[${SCRIPT_ID}] simplify geometry : ${removed} point(s) de forme supprimé(s), ${merged} nœud(s) inutile(s) fusionné(s)`);
+            showToast(t('simplified', simplifiedCount, merged));
         } catch (e) {
             console.error(`[${SCRIPT_ID}] erreur de simplification de géométrie`, e);
         }
