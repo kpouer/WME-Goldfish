@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Goldfish
 // @namespace    https://github.com/kpouer/wme-goldfish
-// @version      0.11.0
+// @version      0.12.0
 // @description  Goldfish, a fish to help you manage Koifish
 // @description:fr  Goldfish un poisson pour vous aider à gérer Koifish
 // @description:en  Goldfish, a fish to help you manage Koifish
@@ -60,6 +60,11 @@
     let quotaBlocked = false;
     /** Vrai pendant l'exécution de Clean : les éditions réservées ne sont pas encore toutes écrites. */
     let cleanRunning = false;
+    /** Journal de l'exécution de Clean en cours : type de changement -> { ids, extra }. */
+    let runLog = null;
+    /** Dernière exécution annulable : { log, beforeCount, afterCount, actions, freshKeys } (null si rien à annuler). */
+    let lastRun = null;
+    let reportPanel;
 
     /** Ids des segments touchés depuis le dernier enregistrement (le SDK n'expose pas d'état "modifié"). */
     const editedIds = new Set();
@@ -86,7 +91,22 @@
             twoWay: 'Double sens (segments non enregistrés et sélection)',
             geometry: 'Simplifier la géométrie (points de forme, nœuds inutiles)',
             mergeFailed: (msg) => `Goldfish : fusion impossible (${msg})`,
-            simplified: (s, m) => `Goldfish : ${s} segment(s) simplifié(s), ${m} nœud(s) inutile(s) supprimé(s)`,
+            reportTitle: 'Goldfish : changements effectués',
+            reportNone: 'Aucun changement',
+            reportStopped: 'Interrompu : plafond horaire atteint',
+            reportSelect: 'Cliquer pour sélectionner les segments encore présents',
+            undo: 'Annuler',
+            close: 'Fermer',
+            undoDone: (n) => `Goldfish : ${n} action(s) annulée(s)`,
+            undoStale: 'Goldfish : la carte a été modifiée depuis, annulation impossible (utilisez l\'annulation de WME)',
+            undoFailed: 'Goldfish : annulation incomplète',
+            logDelete: (n) => `${n} segment(s) < ${MAX_LENGTH_M} m supprimé(s)`,
+            logClean: (n) => `${n} segment(s) passé(s) sans nom ni ville`,
+            logRoadType: (n) => `${n} segment(s) passé(s) en type Street`,
+            logUnpaved: (n) => `« Non bitumé » retiré sur ${n} segment(s)`,
+            logTwoWay: (n) => `${n} segment(s) passé(s) en double sens`,
+            logMerge: (n) => `${n} fusion(s) de segments (nœuds inutiles)`,
+            logGeometry: (n, p) => `${n} segment(s) simplifié(s) (${p} point(s) de forme retiré(s))`,
             quotaTitle: (name, used, limit, pending) => `${name} : ${used}/${limit} éditions scriptées sur la dernière heure (dont ${pending} en attente d'enregistrement)`,
             quotaCountry: (name) => `Pays : ${name} (pas de plafond d'éditions scriptées)`,
             quotaReached: (name, limit) => `Goldfish : plafond de ${limit} éditions scriptées par heure atteint (${name}), actions interrompues`,
@@ -105,7 +125,22 @@
             twoWay: 'Two-way (unsaved segments and selection)',
             geometry: 'Simplify geometry (shape points, useless nodes)',
             mergeFailed: (msg) => `Goldfish: merge failed (${msg})`,
-            simplified: (s, m) => `Goldfish: ${s} segment(s) simplified, ${m} useless node(s) removed`,
+            reportTitle: 'Goldfish: changes made',
+            reportNone: 'No change',
+            reportStopped: 'Stopped: hourly limit reached',
+            reportSelect: 'Click to select the segments that still exist',
+            undo: 'Undo',
+            close: 'Close',
+            undoDone: (n) => `Goldfish: ${n} action(s) undone`,
+            undoStale: 'Goldfish: the map was edited since, cannot undo (use WME undo)',
+            undoFailed: 'Goldfish: undo incomplete',
+            logDelete: (n) => `${n} segment(s) < ${MAX_LENGTH_M} m deleted`,
+            logClean: (n) => `${n} segment(s) set to no name, no city`,
+            logRoadType: (n) => `${n} segment(s) set to Street type`,
+            logUnpaved: (n) => `"Unpaved" removed on ${n} segment(s)`,
+            logTwoWay: (n) => `${n} segment(s) set to two-way`,
+            logMerge: (n) => `${n} segment merge(s) (useless nodes)`,
+            logGeometry: (n, p) => `${n} segment(s) simplified (${p} shape point(s) removed)`,
             quotaTitle: (name, used, limit, pending) => `${name}: ${used}/${limit} scripted edits in the last hour (${pending} pending save)`,
             quotaCountry: (name) => `Country: ${name} (no scripted-edit limit)`,
             quotaReached: (name, limit) => `Goldfish: hourly limit of ${limit} scripted edits reached (${name}), actions stopped`,
@@ -248,12 +283,11 @@
         return false;
     }
 
-    /** Nœuds des nouveaux segments (id négatif) non reliés à un autre segment, avec un segment à moins de 20 m. */
+    /** Nœuds des segments (nouveaux ou existants) non reliés à un autre segment, avec un segment à moins de 20 m. */
     async function findUnconnectedNodes() {
         const nodes = new Map();
         const allSegments = await sdk.DataModel.Segments.getAll();
         for (const segment of allSegments) {
-            if (segment.id >= 0) continue;
             for (const nodeId of [segment.fromNodeId, segment.toNodeId]) {
                 if (nodeId == null || nodes.has(nodeId)) continue;
                 const node = await sdk.DataModel.Nodes.getById({ nodeId });
@@ -532,7 +566,27 @@
 
         // Clic ailleurs : on referme les options.
         document.addEventListener('click', () => setExpanded(false));
-        window.addEventListener('resize', () => expanded && positionOptions());
+        window.addEventListener('resize', positionOptions);
+
+        // Rapport de la dernière exécution (changements effectués + annulation).
+        reportPanel = document.createElement('div');
+        reportPanel.id = `${SCRIPT_ID}-report`;
+        Object.assign(reportPanel.style, {
+            display: 'none',
+            position: 'fixed',
+            zIndex: 10000,
+            minWidth: '220px',
+            maxWidth: '420px',
+            padding: '6px 10px',
+            background: '#fff',
+            border: '1px solid #c0c0c0',
+            borderRadius: '6px',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+            font: '13px sans-serif',
+            color: '#222',
+        });
+        reportPanel.addEventListener('click', (e) => e.stopPropagation());
+        document.body.appendChild(reportPanel);
 
         // Rend le focus à la carte après un clic : un bouton ou une case qui garde le focus bloque les raccourcis de WME.
         const releaseFocus = () => {
@@ -591,7 +645,7 @@
         toolbar.style.left = `${x}px`;
         toolbar.style.top = `${y}px`;
         if (persist) savePrefs({ ...loadPrefs(), left: x, top: y });
-        if (expanded) positionOptions();
+        positionOptions();
     }
 
     /** Remet la barre dans la toolbar WME et oublie la position. */
@@ -601,7 +655,7 @@
         const { left, top, ...rest } = loadPrefs();
         savePrefs(rest);
         mountToolbar();
-        if (expanded) positionOptions();
+        positionOptions();
     }
 
     function enableDrag(handle) {
@@ -628,15 +682,22 @@
         });
     }
 
-    function positionOptions() {
+    /** Place un panneau sous la barre, en le gardant dans la fenêtre. */
+    function positionBelowToolbar(panel) {
         const r = toolbar.getBoundingClientRect();
-        body.style.top = `${Math.round(r.bottom + 4)}px`;
-        const left = Math.min(r.left, window.innerWidth - body.offsetWidth - 4);
-        body.style.left = `${Math.max(4, Math.round(left))}px`;
+        panel.style.top = `${Math.round(r.bottom + 4)}px`;
+        const left = Math.min(r.left, window.innerWidth - panel.offsetWidth - 4);
+        panel.style.left = `${Math.max(4, Math.round(left))}px`;
+    }
+
+    function positionOptions() {
+        positionBelowToolbar(body);
+        if (reportPanel?.style.display === 'block') positionBelowToolbar(reportPanel);
     }
 
     function setExpanded(value) {
         expanded = value;
+        if (expanded) hideReport();
         body.style.display = expanded ? 'block' : 'none';
         toggleButton.textContent = expanded ? '▴' : '▾';
         toggleButton.title = expanded ? t('optHide') : t('optShow');
@@ -652,6 +713,139 @@
         updateQuotaLabel();
     }
 
+    // ------------------------------------------------- rapport, annulation
+
+    /** Note un changement réussi de l'exécution en cours (une écriture SDK = une action). */
+    function logChange(kind, ids, extra = 0) {
+        if (!runLog) return;
+        const entry = runLog.get(kind) ?? { ids: [], extra: 0, actions: 0 };
+        entry.ids.push(...ids);
+        entry.extra += extra;
+        entry.actions++;
+        runLog.set(kind, entry);
+    }
+
+    const LOG_ORDER = [
+        ['delete', (e) => t('logDelete', e.ids.length)],
+        ['clean', (e) => t('logClean', e.ids.length)],
+        ['roadType', (e) => t('logRoadType', e.ids.length)],
+        ['unpaved', (e) => t('logUnpaved', e.ids.length)],
+        ['twoWay', (e) => t('logTwoWay', e.ids.length)],
+        ['merge', (e) => t('logMerge', e.actions)],
+        ['geometry', (e) => t('logGeometry', e.ids.length, e.extra)],
+    ];
+
+    function hideReport() {
+        if (reportPanel) reportPanel.style.display = 'none';
+    }
+
+    /** Sélectionne ceux des segments qui existent encore (supprimés ou fusionnés : ignorés). */
+    async function selectSegments(ids) {
+        const existing = [];
+        for (const id of new Set(ids)) {
+            if (await sdk.DataModel.Segments.getById({ segmentId: id })) existing.push(id);
+        }
+        if (existing.length === 0) return;
+        try {
+            await sdk.Editing.setSelection({ selection: { ids: existing, objectType: 'segment' } });
+        } catch (e) {
+            console.warn(`[${SCRIPT_ID}] sélection impossible`, e);
+        }
+    }
+
+    /** Affiche sous la barre la liste des changements de la dernière exécution, avec un bouton Annuler. */
+    function showReport(log, stopped) {
+        setExpanded(false);
+        reportPanel.replaceChildren();
+        const title = document.createElement('div');
+        title.textContent = t('reportTitle');
+        Object.assign(title.style, { fontWeight: 'bold', marginBottom: '4px' });
+        reportPanel.appendChild(title);
+
+        const list = document.createElement('ul');
+        Object.assign(list.style, { margin: '0', padding: '0 0 0 18px' });
+        for (const [kind, format] of LOG_ORDER) {
+            const entry = log.get(kind);
+            if (!entry) continue;
+            const item = document.createElement('li');
+            item.textContent = format(entry);
+            item.title = `${t('reportSelect')}\n${[...new Set(entry.ids)].join(', ')}`;
+            Object.assign(item.style, { cursor: 'pointer', margin: '2px 0' });
+            item.addEventListener('click', () => selectSegments(entry.ids));
+            list.appendChild(item);
+        }
+        if (list.children.length) {
+            reportPanel.appendChild(list);
+        } else {
+            const none = document.createElement('div');
+            none.textContent = t('reportNone');
+            none.style.color = '#888';
+            reportPanel.appendChild(none);
+        }
+        if (stopped) {
+            const warn = document.createElement('div');
+            warn.textContent = t('reportStopped');
+            Object.assign(warn.style, { color: '#c62828', marginTop: '4px' });
+            reportPanel.appendChild(warn);
+        }
+
+        const buttons = document.createElement('div');
+        Object.assign(buttons.style, { display: 'flex', justifyContent: 'flex-end', gap: '6px', marginTop: '6px' });
+        const makeButton = (label, onClick) => {
+            const b = document.createElement('button');
+            b.textContent = label;
+            Object.assign(b.style, BTN_STYLE, { height: '26px', padding: '0 10px', border: '1px solid #c0c0c0', borderRadius: '4px' });
+            addPressFeedback(b);
+            b.addEventListener('click', onClick);
+            return b;
+        };
+        if (lastRun) buttons.appendChild(makeButton(t('undo'), undoLastRun));
+        buttons.appendChild(makeButton(t('close'), hideReport));
+        reportPanel.appendChild(buttons);
+
+        reportPanel.style.display = 'block';
+        positionBelowToolbar(reportPanel);
+    }
+
+    /**
+     * Annule la dernière exécution de Clean via l'annulation de WME, seulement si la carte n'a pas été
+     * modifiée depuis (sinon on annulerait les éditions de l'utilisateur).
+     */
+    async function undoLastRun() {
+        const run = lastRun;
+        if (!run) return;
+        hideReport();
+        if (await sdk.Editing.getUnsavedChangesCount() !== run.afterCount) {
+            lastRun = null;
+            showToast(t('undoStale'), 6000);
+            return;
+        }
+        // Le compteur de WME donne le nombre exact d'actions ajoutées ; repli sur notre propre décompte.
+        const delta = run.afterCount - run.beforeCount;
+        const count = delta > 0 ? delta : run.actions;
+        let undone = 0;
+        cleanRunning = true; // pas de passage au journal du quota pendant l'annulation
+        try {
+            for (let i = 0; i < count; i++) {
+                await sdk.Editing.undo();
+                undone++;
+            }
+        } catch (e) {
+            console.warn(`[${SCRIPT_ID}] annulation interrompue après ${undone} action(s)`, e);
+        } finally {
+            // Les éditions annulées ne seront pas enregistrées : elles ne comptent plus dans le plafond.
+            if (undone === count) {
+                const pending = pendingEdits.get(run.countryKey);
+                for (const k of run.freshKeys) pending?.delete(k);
+            }
+            cleanRunning = false;
+            lastRun = null;
+        }
+        showToast(undone === count ? t('undoDone', undone) : t('undoFailed'), undone === count ? 2500 : 6000);
+        updateQuotaLabel();
+        await refresh();
+    }
+
     // ------------------------------------------------------- suppression
 
     async function deleteShortSegments() {
@@ -663,6 +857,7 @@
             if (id >= 0 && !reserveEdits([`s${id}`])) break;
             try {
                 await sdk.DataModel.Segments.deleteSegment({ segmentId: id });
+                logChange('delete', [id]);
                 deleted++;
             } catch (e) {
                 console.warn(`[${SCRIPT_ID}] suppression impossible du segment ${id}`, e);
@@ -704,6 +899,7 @@
                 if (segment?.primaryStreetId !== streetId) {
                     if (!reserveEdits([`s${id}`])) break;
                     await sdk.DataModel.Segments.updateAddress({ segmentId: id, addressData: { primaryStreetId: streetId } });
+                    logChange('clean', [id]);
                 }
                 cleaned++;
             } catch (e) {
@@ -745,6 +941,7 @@
             if (segment.roadType === STREET_ROAD_TYPE) return false;
             if (!reserveEdits([`s${id}`])) return false;
             await sdk.DataModel.Segments.updateSegment({ segmentId: id, roadType: STREET_ROAD_TYPE });
+            logChange('roadType', [id]);
         });
     }
 
@@ -753,6 +950,7 @@
             if (!segment.flagAttributes?.unpaved) return false;
             if (!reserveEdits([`s${id}`])) return false;
             await sdk.DataModel.Segments.updateSegment({ segmentId: id, flagAttributes: { unpaved: false } });
+            logChange('unpaved', [id]);
         });
     }
 
@@ -761,6 +959,7 @@
             if (segment.isTwoWay) return false;
             if (!reserveEdits([`s${id}`])) return false;
             await sdk.DataModel.Segments.updateDirection({ segmentId: id, direction: 'TWO_WAY' });
+            logChange('twoWay', [id]);
         });
     }
 
@@ -772,8 +971,14 @@
         // Pays de l'action (plafond horaire) : relu au lancement, la carte a pu bouger.
         quotaBlocked = false;
         cleanRunning = true;
+        hideReport();
         await refreshCountry();
         updateQuotaLabel();
+        // État avant exécution, pour pouvoir annuler exactement ce que Clean a fait.
+        runLog = new Map();
+        const countryKey = currentCountry?.key;
+        const pendingBefore = new Set(pendingEdits.get(countryKey) ?? []);
+        const beforeCount = await sdk.Editing.getUnsavedChangesCount();
         const steps = [
             ['delete', deleteShortSegments],
             ['clean', cleanNewSegments],
@@ -793,6 +998,17 @@
                 }
             }
         } finally {
+            const log = runLog;
+            runLog = null;
+            try {
+                const afterCount = await sdk.Editing.getUnsavedChangesCount();
+                const actions = [...log.values()].reduce((sum, e) => sum + e.actions, 0);
+                const freshKeys = [...(pendingEdits.get(countryKey) ?? [])].filter((k) => !pendingBefore.has(k));
+                lastRun = actions > 0 ? { log, beforeCount, afterCount, actions, countryKey, freshKeys } : null;
+                showReport(log, quotaBlocked);
+            } catch (e) {
+                console.error(`[${SCRIPT_ID}] erreur du rapport`, e);
+            }
             cleanRunning = false;
             cleanButton.blur();
             cleanButton.disabled = false;
@@ -991,6 +1207,7 @@
             if (!reserveEdits([...ids.map((id) => `s${id}`), `merge-${Date.now()}-${merged}`])) break;
             try {
                 await sdk.DataModel.Segments.mergeSegments({ segmentIds: ids });
+                logChange('merge', ids);
                 merged++;
             } catch (e) {
                 console.warn(`[${SCRIPT_ID}] fusion impossible des segments ${ids.join(', ')}`, e);
@@ -1007,7 +1224,6 @@
             const merged = await mergeUselessNodes(segments);
             if (merged > 0) segments = await getTargetSegments(); // les ids ont changé après fusion
             let removed = 0;
-            let simplifiedCount = 0;
             for (const [id, segment] of segments) {
                 const coords = segment.geometry.coordinates;
                 const simplified = douglasPeucker(coords, DP_EPSILON_M);
@@ -1019,13 +1235,12 @@
                         geometry: { type: 'LineString', coordinates: simplified },
                     });
                     removed += coords.length - simplified.length;
-                    simplifiedCount++;
+                    logChange('geometry', [id], coords.length - simplified.length);
                 } catch (e) {
                     console.warn(`[${SCRIPT_ID}] simplification impossible du segment ${id}`, e);
                 }
             }
             console.log(`[${SCRIPT_ID}] simplify geometry : ${removed} point(s) de forme supprimé(s), ${merged} nœud(s) inutile(s) fusionné(s)`);
-            showToast(t('simplified', simplifiedCount, merged));
         } catch (e) {
             console.error(`[${SCRIPT_ID}] erreur de simplification de géométrie`, e);
         }
@@ -1098,6 +1313,9 @@
                 if (dataModelName !== 'segments') return;
                 editedIds.clear();
                 commitPendingEdits();
+                // Enregistré : plus rien à annuler côté Goldfish.
+                lastRun = null;
+                hideReport();
                 scheduleRefresh();
             },
         });
