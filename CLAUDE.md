@@ -22,6 +22,10 @@ Everything lives in one IIFE and uses the WME SDK (`getWmeSdk`, async mode, load
 
 Coordinates are GeoJSON `[lon, lat]` WGS84 throughout.
 
+## Charte d'édition (France)
+
+Lorsque le script édite en France, il doit respecter la charte d'édition de la communauté française sur les scripts et l'édition de masse : https://www.waze.com/discuss/t/scripts-et-edition-de-masse-la-doctrine-de-la-communaute-france/414279. Toute nouvelle action d'édition (ou modification d'une action existante) doit être vérifiée au regard de cette doctrine avant d'être ajoutée.
+
 ## Piste abandonnée : relier des nœuds superposés
 
 Cas visé : deux segments dont les extrémités sont à 0,00 m l'une de l'autre mais portent deux nœuds distincts (`fromNodeId`/`toNodeId` différents). L'étape `connectCloseNodes` (tolérance 0,5 m) devait les relier avant `simplifySelection` (fusion des segments de même type et même nom reliés par un nœud à exactement 2 segments, union-find + `mergeSegments`), qui les ignore sinon (nœud relié à 1 seul segment). Les deux étapes ont été retirées, faute de méthode SDK qui relie vraiment deux nœuds :
