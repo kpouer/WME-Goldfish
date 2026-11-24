@@ -24,6 +24,8 @@
     const SCRIPT_VERSION = typeof GM_info !== 'undefined' ? GM_info.script.version : '?';
     const LAYER_NAME = 'goldfish-short-segments';
     const UNCONNECTED_LAYER_NAME = 'goldfish-unconnected-segments';
+    const HALO_LAYER_NAME = 'goldfish-planned-segments';
+    const DEFAULT_HALO_COLOR = '#00c853'; // green halo of the segments the summary plans to modify
     const NEAR_DISTANCE_M = 20;    // an unconnected node is only reported if a segment is closer than this
     const MAX_LENGTH_M = 1;        // segments strictly shorter than 1 m
     const REFRESH_DELAY_MS = 250;  // refresh debounce
@@ -107,6 +109,8 @@
             planQuotaOver: (n, left) => `Environ ${n} édition(s) scriptée(s) pour ${left} restante(s) dans l'heure : l'exécution s'arrêtera au plafond`,
             planQuotaNone: (n) => `Environ ${n} édition(s) scriptée(s) (pas de plafond dans ce pays)`,
             planStale: 'Goldfish : la carte a changé, résumé mis à jour',
+            settingsHalo: 'Couleur du halo des segments à modifier',
+            settingsHaloReset: 'Couleur par défaut',
             delete: `Supprimer les segments non enregistrés < ${MAX_LENGTH_M} m`,
             clean: 'Nettoyer les segments non enregistrés (sans nom, sans ville)',
             roadType: 'Type Street (segments non enregistrés)',
@@ -157,6 +161,8 @@
             planQuotaOver: (n, left) => `About ${n} scripted edit(s) for ${left} left this hour: the run will stop at the cap`,
             planQuotaNone: (n) => `About ${n} scripted edit(s) (no cap in this country)`,
             planStale: 'Goldfish: the map changed, summary updated',
+            settingsHalo: 'Halo color of the segments to be modified',
+            settingsHaloReset: 'Default color',
             delete: `Delete unsaved segments < ${MAX_LENGTH_M} m`,
             clean: 'Clean unsaved segments (no name, no city)',
             roadType: 'Street type (unsaved segments)',
@@ -207,6 +213,8 @@
 
     async function init() {
         detectLang();
+        // Added first so that the red circles are drawn above the halo.
+        await addHaloLayer();
         await sdk.Map.addLayer({
             layerName: LAYER_NAME,
             styleRules: [{
@@ -243,7 +251,56 @@
         console.log(`[${SCRIPT_ID}] chargé`);
     }
 
-    /** WME "Scripts" tab: script name and version. */
+    /** Halo color from the settings (#rrggbb), DEFAULT_HALO_COLOR if unset or invalid. */
+    function haloColor() {
+        const color = loadPrefs().haloColor;
+        return typeof color === 'string' && /^#[0-9a-f]{6}$/i.test(color) ? color : DEFAULT_HALO_COLOR;
+    }
+
+    /** Layer of the halo around the segments the summary plans to modify (style fixed at creation). */
+    function addHaloLayer() {
+        return sdk.Map.addLayer({
+            layerName: HALO_LAYER_NAME,
+            styleRules: [{
+                style: {
+                    strokeColor: haloColor(),
+                    strokeOpacity: 0.6,
+                    strokeWidth: 14,
+                    strokeLinecap: 'round',
+                    fillOpacity: 0,
+                    pointRadius: 0,
+                },
+            }],
+        });
+    }
+
+    /** Settings of the "Scripts" tab: halo color (color picker + reset). */
+    function createHaloSetting() {
+        const row = document.createElement('label');
+        Object.assign(row.style, { display: 'flex', alignItems: 'center', gap: '6px', margin: '6px 0' });
+        const input = document.createElement('input');
+        input.type = 'color';
+        input.value = haloColor();
+        const reset = document.createElement('button');
+        reset.type = 'button';
+        reset.textContent = '↺';
+        reset.title = t('settingsHaloReset');
+        const apply = async (color) => {
+            savePrefs({ ...loadPrefs(), haloColor: color });
+            input.value = haloColor();
+            await updateHaloColor();
+        };
+        // 'change' fires once the picker is closed (not on every move of the cursor).
+        input.addEventListener('change', () => apply(input.value));
+        reset.addEventListener('click', (e) => {
+            e.preventDefault();
+            apply(DEFAULT_HALO_COLOR);
+        });
+        row.append(input, document.createTextNode(t('settingsHalo')), reset);
+        return row;
+    }
+
+    /** WME "Scripts" tab: script name, version and settings. */
     async function registerScriptTab() {
         try {
             const { tabLabel, tabPane } = await sdk.Sidebar.registerScriptTab();
@@ -257,7 +314,7 @@
             title.textContent = `${SCRIPT_NAME} v${SCRIPT_VERSION}`;
             const desc = document.createElement('p');
             desc.textContent = t('tabDesc', MAX_LENGTH_M);
-            tabPane.append(title, desc);
+            tabPane.append(title, desc, createHaloSetting());
         } catch (e) {
             console.warn(`[${SCRIPT_ID}] impossible d'enregistrer l'onglet Scripts`, e);
         }
@@ -790,6 +847,51 @@
 
     function hideReport() {
         if (reportPanel) reportPanel.style.display = 'none';
+        clearHalo();
+    }
+
+    /** Segments currently surrounded by the halo (those of the displayed summary). */
+    let haloIds = [];
+    /** Incremented on each draw or clear: a draw still running stops when a newer one (or a clear) starts. */
+    let haloGeneration = 0;
+
+    /** Draws the halo around the given segments (those that still exist). */
+    async function drawHalo(ids) {
+        haloIds = [...new Set(ids)];
+        const generation = ++haloGeneration;
+        try {
+            await sdk.Map.removeAllFeaturesFromLayer({ layerName: HALO_LAYER_NAME });
+            for (const id of haloIds) {
+                const segment = await sdk.DataModel.Segments.getById({ segmentId: id });
+                if (generation !== haloGeneration) return;
+                if (!segment) continue;
+                await sdk.Map.addFeatureToLayer({
+                    layerName: HALO_LAYER_NAME,
+                    feature: { type: 'Feature', id: `goldfish-halo-${id}`, geometry: segment.geometry, properties: { segmentId: id } },
+                });
+            }
+        } catch (e) {
+            console.warn(`[${SCRIPT_ID}] halo impossible`, e);
+        }
+    }
+
+    function clearHalo() {
+        if (haloIds.length === 0) return;
+        haloIds = [];
+        haloGeneration++;
+        sdk.Map.removeAllFeaturesFromLayer({ layerName: HALO_LAYER_NAME })
+            ?.catch?.((e) => console.warn(`[${SCRIPT_ID}] halo impossible`, e));
+    }
+
+    /** New halo color: the layer style is fixed at creation, so recreate the layer and redraw the halo. */
+    async function updateHaloColor() {
+        try {
+            await sdk.Map.removeLayer({ layerName: HALO_LAYER_NAME });
+            await addHaloLayer();
+            if (haloIds.length) await drawHalo(haloIds);
+        } catch (e) {
+            console.warn(`[${SCRIPT_ID}] changement de couleur du halo impossible`, e);
+        }
     }
 
     /** Selects those segments that still exist (deleted or merged ones are ignored). */
@@ -902,6 +1004,8 @@
         if (items.length) buttons.push({ label: t('planApply'), onClick: () => applyPlan(plan), primary: true });
         buttons.push({ label: t('close'), onClick: hideReport });
         showPanel(t('planTitle'), items, t('planNone'), notes, buttons);
+        // Segments that may be modified: highlighted on the map while the summary is open.
+        drawHalo(items.flatMap((item) => item.ids));
     }
 
     /**
