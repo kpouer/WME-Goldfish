@@ -34,10 +34,16 @@
     const QUOTA_KEY = `${SCRIPT_ID}-quota`;
     const QUOTA_WINDOW_MS = 60 * 60 * 1000;  // fenêtre glissante d'une heure
     const QUOTA_DISPLAY_MS = 30 * 1000;      // rafraîchissement de l'affichage (les éditions sortent de la fenêtre)
-    // Plafond d'éditions scriptées par heure, par pays (clé : code pays WME, ou nom). Charte France §3.3 : 500/h.
-    const HOURLY_LIMITS = { FR: 500, France: 500 };
-    // Pays où la fusion de segments est limitée aux segments non enregistrés (liste à compléter).
-    const MERGE_UNSAVED_ONLY = { FR: true, France: true };
+    // Règles par défaut = charte France : plafond de 500 éditions scriptées par heure (§3.3), fusion de segments
+    // limitée aux segments non enregistrés. Elles s'appliquent partout, y compris si le pays est inconnu.
+    const DEFAULT_HOURLY_LIMIT = 500;
+    // Pays où les règles permissives s'appliquent (pas de plafond horaire, fusion de tous les segments).
+    // Entrées : code pays WME (ex. 'BE') ou nom du pays. Liste à déterminer.
+    const PERMISSIVE_COUNTRIES = new Set([
+        // 'BE',
+    ]);
+    /** Pays inconnu (carte sans pays, erreur du SDK) : traité comme la France. */
+    const UNKNOWN_COUNTRY = { key: '?', label: '?', name: '?' };
 
     /** @type {import('wme-sdk-typings').WmeSDK} */
     let sdk;
@@ -57,7 +63,7 @@
     let refreshAgain = false;
     let quotaLabel;
     /** Pays courant : { key, label, name } (null si inconnu). */
-    let currentCountry = null;
+    let currentCountry = UNKNOWN_COUNTRY;
     /** Éditions scriptées non enregistrées : clé de pays -> Set de clés d'objets (un objet compte une fois). */
     const pendingEdits = new Map();
     /** Vrai quand le plafond a interrompu l'exécution en cours. */
@@ -365,16 +371,19 @@
         return pendingEdits.get(key)?.size ?? 0;
     }
 
-    /** Plafond horaire du pays (null : pas de plafond). */
-    function limitFor(country) {
-        if (!country) return null;
-        return HOURLY_LIMITS[country.key] ?? HOURLY_LIMITS[country.name] ?? null;
+    /** Vrai si le pays suit les règles permissives (liste PERMISSIVE_COUNTRIES) ; sinon : règles de la charte France. */
+    function isPermissive(country) {
+        return PERMISSIVE_COUNTRIES.has(country.key) || PERMISSIVE_COUNTRIES.has(country.name);
     }
 
-    /** Vrai si la fusion ne doit toucher que des segments non enregistrés dans le pays courant (par prudence aussi si le pays est inconnu). */
+    /** Plafond horaire du pays (null : pas de plafond). */
+    function limitFor(country) {
+        return isPermissive(country) ? null : DEFAULT_HOURLY_LIMIT;
+    }
+
+    /** Vrai si la fusion ne doit toucher que des segments non enregistrés dans le pays courant. */
     function mergeUnsavedOnly() {
-        if (!currentCountry) return true;
-        return Boolean(MERGE_UNSAVED_ONLY[currentCountry.key] ?? MERGE_UNSAVED_ONLY[currentCountry.name]);
+        return !isPermissive(currentCountry);
     }
 
     function toCountryInfo(country) {
@@ -386,9 +395,9 @@
     async function refreshCountry() {
         try {
             const country = await sdk.DataModel.Countries.getTopCountry();
-            currentCountry = country ? toCountryInfo(country) : null;
+            currentCountry = country ? toCountryInfo(country) : UNKNOWN_COUNTRY;
         } catch (e) {
-            currentCountry = null;
+            currentCountry = UNKNOWN_COUNTRY;
         }
     }
 
@@ -397,7 +406,7 @@
      * horaire du pays serait dépassé. Un objet déjà modifié en attente d'enregistrement ne compte qu'une fois.
      */
     function reserveEdits(keys) {
-        if (!currentCountry || quotaBlocked) return !quotaBlocked;
+        if (quotaBlocked) return false;
         const pending = pendingEdits.get(currentCountry.key) ?? new Set();
         const fresh = keys.filter((k) => !pending.has(k));
         const limit = limitFor(currentCountry);
@@ -437,11 +446,6 @@
     /** Pays courant et compteur de la dernière heure dans la toolbar (compteur seulement si le pays a un plafond). */
     function updateQuotaLabel() {
         if (!quotaLabel) return;
-        if (!currentCountry) {
-            quotaLabel.textContent = '';
-            quotaLabel.title = '';
-            return;
-        }
         const limit = limitFor(currentCountry);
         if (limit == null) {
             quotaLabel.textContent = currentCountry.label;
@@ -985,7 +989,7 @@
         updateQuotaLabel();
         // État avant exécution, pour pouvoir annuler exactement ce que Clean a fait.
         runLog = new Map();
-        const countryKey = currentCountry?.key;
+        const countryKey = currentCountry.key;
         const pendingBefore = new Set(pendingEdits.get(countryKey) ?? []);
         const beforeCount = await sdk.Editing.getUnsavedChangesCount();
         const steps = [
