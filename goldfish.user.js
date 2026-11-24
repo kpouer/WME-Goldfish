@@ -24,25 +24,25 @@
     const SCRIPT_VERSION = typeof GM_info !== 'undefined' ? GM_info.script.version : '?';
     const LAYER_NAME = 'goldfish-short-segments';
     const UNCONNECTED_LAYER_NAME = 'goldfish-unconnected-segments';
-    const NEAR_DISTANCE_M = 20;    // un nœud non connecté n'est signalé que si un segment est plus proche
-    const MAX_LENGTH_M = 1;        // segments strictement inférieurs à 1 m
-    const REFRESH_DELAY_MS = 250;  // debounce du rafraîchissement
-    const STREET_ROAD_TYPE = 1;    // id WME du type "Street"
+    const NEAR_DISTANCE_M = 20;    // an unconnected node is only reported if a segment is closer than this
+    const MAX_LENGTH_M = 1;        // segments strictly shorter than 1 m
+    const REFRESH_DELAY_MS = 250;  // refresh debounce
+    const STREET_ROAD_TYPE = 1;    // WME id of the "Street" road type
     const EARTH_RADIUS_M = 6371008.8;
-    const DP_EPSILON_M = 1;        // tolérance Douglas-Peucker en mètres
+    const DP_EPSILON_M = 1;        // Douglas-Peucker tolerance in meters
     const PREFS_KEY = `${SCRIPT_ID}-prefs`;
     const QUOTA_KEY = `${SCRIPT_ID}-quota`;
-    const QUOTA_WINDOW_MS = 60 * 60 * 1000;  // fenêtre glissante d'une heure
-    const QUOTA_DISPLAY_MS = 30 * 1000;      // rafraîchissement de l'affichage (les éditions sortent de la fenêtre)
-    // Règles par défaut = charte France : plafond de 500 éditions scriptées par heure (§3.3), fusion de segments
-    // limitée aux segments non enregistrés. Elles s'appliquent partout, y compris si le pays est inconnu.
+    const QUOTA_WINDOW_MS = 60 * 60 * 1000;  // one-hour sliding window
+    const QUOTA_DISPLAY_MS = 30 * 1000;      // display refresh (edits leave the window)
+    // Default rules = French charter: cap of 500 scripted edits per hour (§3.3), segment merging
+    // limited to unsaved segments. They apply everywhere, including when the country is unknown.
     const DEFAULT_HOURLY_LIMIT = 500;
-    // Pays où les règles permissives s'appliquent (pas de plafond horaire, fusion de tous les segments).
-    // Entrées : code pays WME (ex. 'BE') ou nom du pays. Liste à déterminer.
+    // Countries where the permissive rules apply (no hourly cap, merging of all segments).
+    // Entries: WME country code (e.g. 'BE') or country name. List to be determined.
     const PERMISSIVE_COUNTRIES = new Set([
         // 'BE',
     ]);
-    /** Pays inconnu (carte sans pays, erreur du SDK) : traité comme la France. */
+    /** Unknown country (map without country, SDK error): treated like France. */
     const UNKNOWN_COUNTRY = { key: '?', label: '?', name: '?' };
 
     /** @type {import('wme-sdk-typings').WmeSDK} */
@@ -52,7 +52,7 @@
     let countLabel;
     let cleanButton;
     const checkboxes = {};
-    /** Nœuds texte des libellés des cases (certains changent selon le pays). */
+    /** Text nodes of the checkbox labels (some change depending on the country). */
     const optionLabels = {};
     let toggleButton;
     let expanded = false;
@@ -62,23 +62,23 @@
     let refreshing = false;
     let refreshAgain = false;
     let quotaLabel;
-    /** Pays courant : { key, label, name } (null si inconnu). */
+    /** Current country: { key, label, name } (UNKNOWN_COUNTRY if unknown). */
     let currentCountry = UNKNOWN_COUNTRY;
-    /** Éditions scriptées non enregistrées : clé de pays -> Set de clés d'objets (un objet compte une fois). */
+    /** Unsaved scripted edits: country key -> Set of object keys (an object counts once). */
     const pendingEdits = new Map();
-    /** Vrai quand le plafond a interrompu l'exécution en cours. */
+    /** True when the cap interrupted the current run. */
     let quotaBlocked = false;
-    /** Vrai pendant l'exécution de Clean : les éditions réservées ne sont pas encore toutes écrites. */
+    /** True while Clean runs: reserved edits are not all written yet. */
     let cleanRunning = false;
-    /** Journal de l'exécution de Clean en cours : type de changement -> { ids, extra }. */
+    /** Log of the current Clean run: change type -> { ids, extra }. */
     let runLog = null;
-    /** Dernière exécution annulable : { log, beforeCount, afterCount, actions, freshKeys } (null si rien à annuler). */
+    /** Last undoable run: { log, beforeCount, afterCount, actions, freshKeys } (null if nothing to undo). */
     let lastRun = null;
     let reportPanel;
 
-    /** Résultat courant : [{ id, length, geometry }] (segments non enregistrés < MAX_LENGTH_M) */
+    /** Current result: [{ id, length, geometry }] (unsaved segments < MAX_LENGTH_M) */
     let shortSegments = [];
-    /** Nœuds non connectés des nouveaux segments */
+    /** Unconnected nodes of the segments */
     let unconnectedNodes = [];
 
     // ---------------------------------------------------------------- init
@@ -157,15 +157,15 @@
         },
     };
     let lang = 'en';
-    /** Texte traduit (langue de WME, anglais par défaut). */
+    /** Translated text (WME language, English by default). */
     function t(key, ...args) {
         const v = MESSAGES[lang][key] ?? MESSAGES.en[key];
         return typeof v === 'function' ? v(...args) : v;
     }
-    /** Choisit la langue selon la locale de WME (repli : langue du navigateur). */
+    /** Picks the language from the WME locale (fallback: browser language). */
     function detectLang() {
         let code = '';
-        try { code = sdk.Settings.getLocale()?.localeCode ?? ''; } catch (e) { /* repli ci-dessous */ }
+        try { code = sdk.Settings.getLocale()?.localeCode ?? ''; } catch (e) { /* fallback below */ }
         code = (code || document.documentElement.lang || navigator.language || '').toLowerCase();
         lang = code.startsWith('fr') ? 'fr' : 'en';
     }
@@ -206,14 +206,14 @@
         await registerScriptTab();
         createToolbar();
         registerEvents();
-        // Affichage seulement : les éditions anciennes sortent de la fenêtre d'une heure, ou un autre onglet les a enregistrées.
+        // Display only: old edits leave the one-hour window, or another tab saved them.
         setInterval(updateQuotaLabel, QUOTA_DISPLAY_MS);
         window.addEventListener('storage', (e) => e.key === QUOTA_KEY && updateQuotaLabel());
         await refresh();
         console.log(`[${SCRIPT_ID}] chargé`);
     }
 
-    /** Onglet « Scripts » de WME : nom et version du script. */
+    /** WME "Scripts" tab: script name and version. */
     async function registerScriptTab() {
         try {
             const { tabLabel, tabPane } = await sdk.Sidebar.registerScriptTab();
@@ -233,9 +233,9 @@
         }
     }
 
-    // --------------------------------------------------------- détection
+    // --------------------------------------------------------- detection
 
-    /** Distance haversine en mètres entre deux positions GeoJSON [lon, lat]. */
+    /** Haversine distance in meters between two GeoJSON positions [lon, lat]. */
     function haversine([lon1, lat1], [lon2, lat2]) {
         const rad = Math.PI / 180;
         const dLat = (lat2 - lat1) * rad;
@@ -245,7 +245,7 @@
         return 2 * EARTH_RADIUS_M * Math.asin(Math.sqrt(a));
     }
 
-    /** Longueur en mètres d'une LineString GeoJSON (lon/lat WGS84). */
+    /** Length in meters of a GeoJSON LineString (lon/lat WGS84). */
     function lineLength(geometry) {
         const c = geometry.coordinates;
         let total = 0;
@@ -253,7 +253,7 @@
         return total;
     }
 
-    /** Segments non enregistrés (id négatif) plus courts que MAX_LENGTH_M : jamais un segment existant. */
+    /** Unsaved segments (negative id) shorter than MAX_LENGTH_M: never an existing segment. */
     async function findShortSegments() {
         const segments = await sdk.DataModel.Segments.getAll();
         const result = [];
@@ -265,7 +265,7 @@
         return result;
     }
 
-    /** Vrai si un segment autre que `ownIds` passe à moins de NEAR_DISTANCE_M de `point` ([lon, lat]). */
+    /** True if a segment other than `ownIds` passes within NEAR_DISTANCE_M of `point` ([lon, lat]). */
     function hasSegmentNearby(point, allSegments, ownIds) {
         const rad = Math.PI / 180;
         const cos = Math.cos(point[1] * rad);
@@ -284,7 +284,7 @@
         return false;
     }
 
-    /** Nœuds des segments (nouveaux ou existants) non reliés à un autre segment, avec un segment à moins de 20 m. */
+    /** Nodes of segments (new or existing) not connected to another segment, with a segment within 20 m. */
     async function findUnconnectedNodes() {
         const nodes = new Map();
         const allSegments = await sdk.DataModel.Segments.getAll();
@@ -303,9 +303,9 @@
         return [...nodes.values()];
     }
 
-    // ------------------------------------------------------ surbrillance
+    // ------------------------------------------------------ highlighting
 
-    /** Milieu (moyenne des extrémités) d'une LineString : suffisant pour un segment de moins d'un mètre. */
+    /** Midpoint (average of the end points) of a LineString: enough for a segment under one meter. */
     function lineMidpoint(geometry) {
         const c = geometry.coordinates;
         const [lon1, lat1] = c[0];
@@ -330,7 +330,7 @@
         for (const { id, geometry } of shortSegments) {
             await sdk.Map.addFeatureToLayer({
                 layerName: LAYER_NAME,
-                // Un segment < 1 m est invisible : on l'entoure d'un cercle rouge centré sur son milieu.
+                // A segment < 1 m is invisible: circle it in red, centered on its midpoint.
                 feature: { type: 'Feature', id: `goldfish-${id}`, geometry: { type: 'Point', coordinates: lineMidpoint(geometry) }, properties: { segmentId: id } },
             });
         }
@@ -338,12 +338,12 @@
 
     // ------------------------------------------------------------ quota
 
-    /** Journal des éditions enregistrées : { [pays]: [[horodatage, nombre], ...] }, relu à chaque accès (partagé entre onglets). */
+    /** Log of saved edits: { [country]: [[timestamp, count], ...] }, re-read on each access (shared between tabs). */
     function loadQuota() {
         let data = {};
         try {
             data = JSON.parse(localStorage.getItem(QUOTA_KEY)) ?? {};
-        } catch (e) { /* journal illisible : on repart de zéro */ }
+        } catch (e) { /* unreadable log: start from scratch */ }
         const since = Date.now() - QUOTA_WINDOW_MS;
         const clean = {};
         for (const [key, entries] of Object.entries(data)) {
@@ -358,11 +358,11 @@
         try {
             localStorage.setItem(QUOTA_KEY, JSON.stringify(data));
         } catch (e) {
-            // stockage indisponible : le compteur ne survivra pas au rechargement
+            // storage unavailable: the counter will not survive a reload
         }
     }
 
-    /** Éditions enregistrées sur la dernière heure pour ce pays. */
+    /** Edits saved in the last hour for this country. */
     function committedCount(key) {
         return (loadQuota()[key] ?? []).reduce((sum, [, n]) => sum + n, 0);
     }
@@ -371,17 +371,17 @@
         return pendingEdits.get(key)?.size ?? 0;
     }
 
-    /** Vrai si le pays suit les règles permissives (liste PERMISSIVE_COUNTRIES) ; sinon : règles de la charte France. */
+    /** True if the country follows the permissive rules (PERMISSIVE_COUNTRIES list); otherwise: French charter rules. */
     function isPermissive(country) {
         return PERMISSIVE_COUNTRIES.has(country.key) || PERMISSIVE_COUNTRIES.has(country.name);
     }
 
-    /** Plafond horaire du pays (null : pas de plafond). */
+    /** Hourly cap of the country (null: no cap). */
     function limitFor(country) {
         return isPermissive(country) ? null : DEFAULT_HOURLY_LIMIT;
     }
 
-    /** Vrai si la fusion ne doit toucher que des segments non enregistrés dans le pays courant. */
+    /** True if merging must only touch unsaved segments in the current country. */
     function mergeUnsavedOnly() {
         return !isPermissive(currentCountry);
     }
@@ -402,8 +402,8 @@
     }
 
     /**
-     * Réserve des éditions (clés d'objets) avant d'écrire. Retourne false, sans rien réserver, si le plafond
-     * horaire du pays serait dépassé. Un objet déjà modifié en attente d'enregistrement ne compte qu'une fois.
+     * Reserves edits (object keys) before writing. Returns false, reserving nothing, if the country's
+     * hourly cap would be exceeded. An object already modified and awaiting save counts only once.
      */
     function reserveEdits(keys) {
         if (quotaBlocked) return false;
@@ -422,14 +422,14 @@
         return true;
     }
 
-    /** Abandonne les réservations en attente (modifications toutes annulées sans enregistrement). */
+    /** Drops the pending reservations (all changes undone without saving). */
     function discardPendingEdits() {
         if (pendingEdits.size === 0) return;
         pendingEdits.clear();
         updateQuotaLabel();
     }
 
-    /** Les éditions en attente passent dans le journal à l'enregistrement uniquement (la charte les compte à ce moment-là). */
+    /** Pending edits go into the log only on save (the charter counts them at that point). */
     function commitPendingEdits() {
         if (pendingEdits.size === 0) return;
         const data = loadQuota();
@@ -443,7 +443,7 @@
         updateQuotaLabel();
     }
 
-    /** Pays courant et compteur de la dernière heure dans la toolbar (compteur seulement si le pays a un plafond). */
+    /** Current country and last-hour counter in the toolbar (counter only if the country has a cap). */
     function updateQuotaLabel() {
         if (!quotaLabel) return;
         const limit = limitFor(currentCountry);
@@ -454,8 +454,8 @@
             return;
         }
         const pending = pendingCount(currentCountry.key);
-        // Le compteur affiché n'inclut que les éditions enregistrées ; les réservations en attente restent
-        // comptées pour le plafond (reserveEdits) et sont indiquées dans l'infobulle.
+        // The displayed counter only includes saved edits; pending reservations still
+        // count toward the cap (reserveEdits) and are shown in the tooltip.
         const used = committedCount(currentCountry.key);
         quotaLabel.textContent = `${currentCountry.label} ${used}/${limit}`;
         const total = used + pending;
@@ -474,7 +474,7 @@
         color: 'inherit',
     };
 
-    /** Retour visuel sur un bouton : survol et enfoncement (le bouton « bouge » au clic). */
+    /** Visual feedback on a button: hover and press (the button "moves" on click). */
     function addPressFeedback(button) {
         const set = (background, transform) => {
             if (button.disabled) return;
@@ -489,10 +489,10 @@
         button.addEventListener('pointercancel', () => set('transparent', 'none'));
     }
 
-    /** Icône du poisson (SVG inline, servie en data URI pour éviter l'injection de HTML). */
+    /** Fish icon (inline SVG, served as a data URI to avoid HTML injection). */
     const FISH_ICON_URL = `data:image/svg+xml;charset=utf-8,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><g fill="#F37934"><path d="M240.835,288.625c-19.528,25.107-64.51,122.453-145.4,116.873c-80.901-5.579-89.27-58.583-89.27-58.583c13.948,0,69.015,22.068,75.603-22.828c8.684-59.159,90.377-62.252,90.377-62.252c-71.131-2.79-59.039-53.905-84.949-72.347C58.974,169.408,0,199.074,0,199.074c61.503-209.497,234.181,16.781,234.181,16.781c-13.21,10.377-21.59,21.862-21.59,33.954C212.591,263.822,223.847,277.022,240.835,288.625z"/><path d="M428.437,179.378c-14.969-6.111-31.88-9.997-50.67-9.997c-23.305,0-66.008,9.52-102.632,24.89c-41.444-46.708,4.982-63.815,13.981-63.945c17.596-0.25,43.321,0,97.02-20.928C439.834,88.48,428.437,179.378,428.437,179.378z"/><path d="M429.368,367.453c-24.999,18.138-117.351,11.875-116.58-2.725c1.042-19.81,9.965-31.783,19.549-40.586c17.161,3.929,32.673,6.09,43.777,6.09c23.023,0,43.224-5.84,60.483-14.437C442.437,324.305,453.422,346.091,429.368,367.453z"/></g><path fill="#FBA026" d="M512,249.803c0,0-25.313,45.308-73.4,69.243c-17.27,8.608-37.471,14.448-60.494,14.448c-46.22,0-168.77-37.471-168.77-83.69c0-22.914,30.133-43.68,66.138-58.789c36.624-15.37,79.327-24.89,102.632-24.89c18.79,0,35.701,3.886,50.67,9.997C483.235,198.319,512,249.803,512,249.803z"/><g fill="#F37934"><path d="M512,249.803c0,0-25.313,45.308-73.4,69.243h-0.011c-12.841-7.077-36.602-28.515-36.602-69.243s16.89-63.023,26.79-73.682C483.235,198.319,512,249.803,512,249.803z"/><path d="M363.809,226.055c-11.89,0-21.528-9.639-21.528-21.528c0-11.89,9.639-21.528,21.528-21.528V226.055z"/><path d="M363.809,269.113c-11.89,0-21.528-9.639-21.528-21.528c0-11.89,9.639-21.528,21.528-21.528V269.113z"/><path d="M363.809,312.169c-11.89,0-21.528-9.639-21.528-21.528c0-11.89,9.639-21.528,21.528-21.528V312.169z"/><path d="M304.107,233.808c-7.608,0-13.777-6.168-13.777-13.777c0-7.609,6.168-13.777,13.777-13.777V233.808z"/><path d="M304.107,261.361c-7.608,0-13.777-6.168-13.777-13.777c0-7.608,6.168-13.777,13.777-13.777V261.361z"/><path d="M304.107,288.913c-7.608,0-13.777-6.168-13.777-13.777c0-7.608,6.168-13.777,13.777-13.777V288.913z"/></g><circle fill="#CA463D" cx="446.229" cy="238.903" r="8.684"/></svg>')}`;
 
-    /** Bouton « split » dans la toolbar de WME : poisson (exécute Clean) + ▾ (ouvre les options). */
+    /** Split button in the WME toolbar: fish (runs Clean) + ▾ (opens the options). */
     function createToolbar() {
         toolbar = document.createElement('div');
         toolbar.id = `${SCRIPT_ID}-toolbar`;
@@ -533,7 +533,7 @@
             setExpanded(!expanded);
         });
 
-        // Poignée de déplacement (double-clic : remet la barre dans la toolbar de WME).
+        // Drag handle (double-click: puts the bar back in the WME toolbar).
         grip = document.createElement('span');
         grip.textContent = '⠿';
         grip.title = t('grip');
@@ -550,7 +550,7 @@
 
         toolbar.append(grip, cleanButton, toggleButton);
 
-        // Panneau d'options (ajouté au body pour ne pas être rogné par la toolbar).
+        // Options panel (added to body so the toolbar does not clip it).
         body = document.createElement('div');
         body.id = `${SCRIPT_ID}-options`;
         Object.assign(body.style, {
@@ -585,11 +585,11 @@
         }
         document.body.appendChild(body);
 
-        // Clic ailleurs : on referme les options.
+        // Click elsewhere: close the options.
         document.addEventListener('click', () => setExpanded(false));
         window.addEventListener('resize', positionOptions);
 
-        // Rapport de la dernière exécution (changements effectués + annulation).
+        // Report of the last run (changes made + undo).
         reportPanel = document.createElement('div');
         reportPanel.id = `${SCRIPT_ID}-report`;
         Object.assign(reportPanel.style, {
@@ -609,7 +609,7 @@
         reportPanel.addEventListener('click', (e) => e.stopPropagation());
         document.body.appendChild(reportPanel);
 
-        // Rend le focus à la carte après un clic : un bouton ou une case qui garde le focus bloque les raccourcis de WME.
+        // Gives focus back to the map after a click: a button or checkbox that keeps focus blocks WME shortcuts.
         const releaseFocus = () => {
             const active = document.activeElement;
             if (active && active !== document.body && toolbar.contains(active)) active.blur();
@@ -639,11 +639,11 @@
         try {
             localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
         } catch (e) {
-            // stockage indisponible : on ignore
+            // storage unavailable: ignore
         }
     }
 
-    /** Insère le bouton dans la toolbar de WME ; repli en haut à gauche de la carte si elle est introuvable. */
+    /** Inserts the button in the WME toolbar; falls back to floating at the top left of the map if it is not found. */
     function mountToolbar() {
         const host = document.querySelector('#edit-buttons');
         if (host) {
@@ -654,7 +654,7 @@
         floatAt(60, 60, false);
     }
 
-    /** Détache la barre de la toolbar WME et la positionne (fixe), en la gardant visible. */
+    /** Detaches the bar from the WME toolbar and positions it (fixed), keeping it visible. */
     function floatAt(left, top, persist = true) {
         if (!floating) {
             floating = true;
@@ -669,7 +669,7 @@
         positionOptions();
     }
 
-    /** Remet la barre dans la toolbar WME et oublie la position. */
+    /** Puts the bar back in the WME toolbar and forgets the position. */
     function dock() {
         floating = false;
         Object.assign(toolbar.style, { position: '', zIndex: '', top: '', left: '', margin: '0 4px', boxShadow: '' });
@@ -693,9 +693,9 @@
                 handle.removeEventListener('pointermove', onMove);
                 handle.removeEventListener('pointerup', onUp);
                 handle.removeEventListener('pointercancel', onUp);
-                if (floating) floatAt(toolbar.offsetLeft, toolbar.offsetTop); // sauvegarde
+                if (floating) floatAt(toolbar.offsetLeft, toolbar.offsetTop); // save
             };
-            // Première prise : on fige la position actuelle avant de suivre la souris.
+            // First grab: freeze the current position before following the mouse.
             floatAt(r.left, r.top, false);
             handle.addEventListener('pointermove', onMove);
             handle.addEventListener('pointerup', onUp);
@@ -703,7 +703,7 @@
         });
     }
 
-    /** Place un panneau sous la barre, en le gardant dans la fenêtre. */
+    /** Places a panel below the bar, keeping it inside the window. */
     function positionBelowToolbar(panel) {
         const r = toolbar.getBoundingClientRect();
         panel.style.top = `${Math.round(r.bottom + 4)}px`;
@@ -731,14 +731,14 @@
         countLabel.style.color = '#c2185b';
         countLabel.style.fontWeight = 'bold';
         cleanButton.title = n === 0 ? t('cleanTitle') : t('cleanTitleCount', n);
-        // La fusion de segments dépend du pays : le libellé suit le pays courant.
+        // Segment merging depends on the country: the label follows the current country.
         if (optionLabels.geometry) optionLabels.geometry.textContent = t(mergeUnsavedOnly() ? 'geometryMergeUnsaved' : 'geometry');
         updateQuotaLabel();
     }
 
-    // ------------------------------------------------- rapport, annulation
+    // ------------------------------------------------- report, undo
 
-    /** Note un changement réussi de l'exécution en cours (une écriture SDK = une action). */
+    /** Records a successful change of the current run (one SDK write = one action). */
     function logChange(kind, ids, extra = 0) {
         if (!runLog) return;
         const entry = runLog.get(kind) ?? { ids: [], extra: 0, actions: 0 };
@@ -762,7 +762,7 @@
         if (reportPanel) reportPanel.style.display = 'none';
     }
 
-    /** Sélectionne ceux des segments qui existent encore (supprimés ou fusionnés : ignorés). */
+    /** Selects those segments that still exist (deleted or merged ones are ignored). */
     async function selectSegments(ids) {
         const existing = [];
         for (const id of new Set(ids)) {
@@ -776,7 +776,7 @@
         }
     }
 
-    /** Affiche sous la barre la liste des changements de la dernière exécution, avec un bouton Annuler. */
+    /** Shows below the bar the list of changes of the last run, with an Undo button. */
     function showReport(log, stopped) {
         setExpanded(false);
         reportPanel.replaceChildren();
@@ -831,8 +831,8 @@
     }
 
     /**
-     * Annule la dernière exécution de Clean via l'annulation de WME, seulement si la carte n'a pas été
-     * modifiée depuis (sinon on annulerait les éditions de l'utilisateur).
+     * Undoes the last Clean run via WME's undo, only if the map has not been
+     * modified since (otherwise the user's own edits would be undone).
      */
     async function undoLastRun() {
         const run = lastRun;
@@ -843,11 +843,11 @@
             showToast(t('undoStale'), 6000);
             return;
         }
-        // Le compteur de WME donne le nombre exact d'actions ajoutées ; repli sur notre propre décompte.
+        // WME's counter gives the exact number of added actions; fall back to our own count.
         const delta = run.afterCount - run.beforeCount;
         const count = delta > 0 ? delta : run.actions;
         let undone = 0;
-        cleanRunning = true; // pas de passage au journal du quota pendant l'annulation
+        cleanRunning = true; // no move to the quota log during the undo
         try {
             for (let i = 0; i < count; i++) {
                 await sdk.Editing.undo();
@@ -856,7 +856,7 @@
         } catch (e) {
             console.warn(`[${SCRIPT_ID}] annulation interrompue après ${undone} action(s)`, e);
         } finally {
-            // Les éditions annulées ne seront pas enregistrées : elles ne comptent plus dans le plafond.
+            // Undone edits will not be saved: they no longer count toward the cap.
             if (undone === count) {
                 const pending = pendingEdits.get(run.countryKey);
                 for (const k of run.freshKeys) pending?.delete(k);
@@ -869,14 +869,14 @@
         await refresh();
     }
 
-    // ------------------------------------------------------- suppression
+    // ------------------------------------------------------- deletion
 
     async function deleteShortSegments() {
-        // Recalcul pour ne pas supprimer sur la base d'un état périmé.
+        // Recompute so as not to delete based on a stale state.
         const targets = await findShortSegments();
         let deleted = 0;
         for (const { id } of targets) {
-            // Un segment non enregistré (id négatif) n'existe pas côté serveur : sa suppression ne compte pas.
+            // An unsaved segment (negative id) does not exist server-side: deleting it does not count.
             if (id >= 0 && !reserveEdits([`s${id}`])) break;
             try {
                 await sdk.DataModel.Segments.deleteSegment({ segmentId: id });
@@ -891,7 +891,7 @@
 
     // ------------------------------------------------------------ clean
 
-    /** Rue sans nom dans une ville sans nom (créées si besoin). */
+    /** Unnamed street in an unnamed city (created if needed). */
     async function getEmptyStreetId() {
         const countryId = (await sdk.DataModel.Countries.getTopCountry()).id;
         const city = sdk.DataModel.Cities.getCity({ cityName: '', countryId })
@@ -903,7 +903,7 @@
     }
 
     async function cleanNewSegments() {
-        // Segments pas encore enregistrés uniquement (id négatif) : un segment existant garde son nom et sa ville.
+        // Unsaved segments only (negative id): an existing segment keeps its name and city.
         const targets = (await sdk.DataModel.Segments.getAll()).filter((s) => s.id < 0).map((s) => ({ id: s.id }));
         if (targets.length === 0) {
             console.log(`[${SCRIPT_ID}] clean : aucun segment non enregistré`);
@@ -927,12 +927,12 @@
         console.log(`[${SCRIPT_ID}] ${cleaned}/${targets.length} segment(s) nettoyé(s)`);
     }
 
-    /** Segments non enregistrés (id négatif) uniquement : un segment existant n'est jamais modifié ici. */
+    /** Unsaved segments (negative id) only: an existing segment is never modified here. */
     async function getUnsavedIds() {
         return (await sdk.DataModel.Segments.getAll()).filter((s) => s.id < 0).map((s) => s.id);
     }
 
-    /** Applique `apply(segment, id)` à chaque segment non enregistré ; `apply` retourne false si rien à faire. */
+    /** Applies `apply(segment, id)` to each unsaved segment; `apply` returns false if there is nothing to do. */
     async function updateUnsaved(label, apply) {
         const ids = await getUnsavedIds();
         let done = 0;
@@ -949,7 +949,7 @@
     }
 
     function setRoadTypeStreet() {
-        // updateSegment échoue (InvalidStateError) quand rien ne change : on l'évite.
+        // updateSegment fails (InvalidStateError) when nothing changes: avoid it.
         return updateUnsaved('type Street', async (segment, id) => {
             if (segment.roadType === STREET_ROAD_TYPE) return false;
             if (!reserveEdits([`s${id}`])) return false;
@@ -976,18 +976,18 @@
         });
     }
 
-    /** Exécute les actions cochées, dans l'ordre. */
+    /** Runs the checked actions, in order. */
     async function runClean() {
         cleanButton.disabled = true;
-        cleanButton.style.opacity = '0.5'; // exécution en cours
+        cleanButton.style.opacity = '0.5'; // run in progress
         cleanButton.style.transform = 'none';
-        // Pays de l'action (plafond horaire) : relu au lancement, la carte a pu bouger.
+        // Country of the action (hourly cap): re-read at launch, the map may have moved.
         quotaBlocked = false;
         cleanRunning = true;
         hideReport();
         await refreshCountry();
         updateQuotaLabel();
-        // État avant exécution, pour pouvoir annuler exactement ce que Clean a fait.
+        // State before the run, to be able to undo exactly what Clean did.
         runLog = new Map();
         const countryKey = currentCountry.key;
         const pendingBefore = new Set(pendingEdits.get(countryKey) ?? []);
@@ -1003,7 +1003,7 @@
         try {
             for (const [key, fn] of steps) {
                 if (!checkboxes[key].checked) continue;
-                if (quotaBlocked) break; // plafond atteint : on n'enchaîne pas les étapes suivantes
+                if (quotaBlocked) break; // cap reached: do not chain the next steps
                 try {
                     await fn();
                 } catch (e) {
@@ -1031,11 +1031,11 @@
         }
     }
 
-    // ------------------------------------------------------- cible
+    // ------------------------------------------------------- target
 
     /**
-     * Segments ciblés : la sélection s'il y en a une, sinon tous les segments visibles
-     * (chargés dans l'emprise courante de la carte). Retourne une Map id -> segment.
+     * Target segments: the selection if there is one, otherwise all visible segments
+     * (loaded in the current map extent). Returns a Map id -> segment.
      */
     async function getTargetSegments() {
         const targets = new Map();
@@ -1050,13 +1050,13 @@
         return getVisibleSegments();
     }
 
-    /** Tous les segments chargés dont une partie est dans l'emprise de la carte (sans tenir compte de la sélection). */
+    /** All loaded segments with a part inside the map extent (ignoring the selection). */
     async function getVisibleSegments() {
         const targets = new Map();
         let extent = null;
         try {
             extent = await sdk.Map.getMapExtent(); // [minLon, minLat, maxLon, maxLat]
-        } catch (e) { /* pas d'emprise : on prend tous les segments chargés */ }
+        } catch (e) { /* no extent: take all loaded segments */ }
         for (const segment of await sdk.DataModel.Segments.getAll()) {
             if (extent && !segment.geometry.coordinates.some(([lon, lat]) =>
                 lon >= extent[0] && lon <= extent[2] && lat >= extent[1] && lat <= extent[3])) continue;
@@ -1067,7 +1067,7 @@
 
     // ----------------------------------------------- Douglas-Peucker
 
-    /** Distance (m) d'un point au segment [a, b], en repère plan local. */
+    /** Distance (m) from a point to the segment [a, b], in a local planar frame. */
     function pointToSegmentDist(p, a, b) {
         const dx = b.x - a.x;
         const dy = b.y - a.y;
@@ -1078,13 +1078,13 @@
     }
 
     /**
-     * Douglas-Peucker sur une liste de positions GeoJSON [lon, lat].
-     * Les distances sont calculées en mètres (projection équirectangulaire locale) ;
-     * les extrémités sont toujours conservées.
+     * Douglas-Peucker on a list of GeoJSON positions [lon, lat].
+     * Distances are computed in meters (local equirectangular projection);
+     * the end points are always kept.
      */
     function douglasPeucker(coords, epsilonM) {
-        // Une passe n'est pas idempotente (les cordes changent une fois des points retirés) :
-        // on répète jusqu'au point fixe pour qu'une nouvelle application ne change plus rien.
+        // A single pass is not idempotent (chords change once points are removed):
+        // repeat until a fixed point so that applying it again changes nothing.
         let current = coords;
         for (;;) {
             const next = douglasPeuckerPass(current, epsilonM);
@@ -1120,7 +1120,7 @@
         return coords.filter((_, i) => keep[i]);
     }
 
-    /** Affiche un message furtif en bas de l'écran, qui disparaît seul après `durationMs`. */
+    /** Shows a transient message at the bottom of the screen, which disappears on its own after `durationMs`. */
     function showToast(text, durationMs = 2500) {
         const toast = document.createElement('div');
         toast.textContent = text;
@@ -1151,24 +1151,24 @@
     }
 
     /**
-     * Fusionne les segments reliés par un nœud « inutile » : nœud à exactement 2 segments,
-     * de même type de route, même rue (nom et ville), sens compatibles, mêmes vitesses limites,
-     * même option « non bitumé » et mêmes restrictions. Dans certains pays (France), limitée aux segments non enregistrés (id négatif). Retourne le nombre de segments supprimés par fusion.
+     * Merges segments joined by a "useless" node: a node with exactly 2 segments,
+     * same road type, same street (name and city), compatible directions, same speed limits,
+     * same "unpaved" option and same restrictions. In some countries (France), limited to unsaved segments (negative id). Returns the number of segments removed by merging.
      */
     async function mergeUselessNodes(targets) {
         let total = 0;
-        // Cible stable d'une passe à l'autre : la sélection peut être perdue après une fusion.
-        // On suit donc les ids de départ, plus les ids créés par les fusions (absents de l'état initial).
+        // Target stable from one pass to the next: the selection may be lost after a merge.
+        // So we track the starting ids, plus the ids created by merges (absent from the initial state).
         const initialVisible = new Set((await getVisibleSegments()).keys());
         const targetIds = new Set(targets.keys());
         const unsavedOnly = mergeUnsavedOnly();
-        // mergeSegments refuse les groupes de plus de 2 segments : on fusionne deux par deux,
-        // puis on relit les données (les ids changent) jusqu'à ce qu'il n'y ait plus rien à fusionner.
+        // mergeSegments refuses groups of more than 2 segments: merge two at a time,
+        // then re-read the data (ids change) until there is nothing left to merge.
         for (let pass = 0; pass < 20; pass++) {
             const visible = await getVisibleSegments();
             const current = new Map();
             for (const [id, seg] of visible) {
-                // Dans les pays concernés, seuls les segments non enregistrés (id négatif) peuvent être fusionnés.
+                // In the affected countries, only unsaved segments (negative id) can be merged.
                 if (unsavedOnly && id >= 0) continue;
                 if ((targetIds.has(id) || !initialVisible.has(id))) current.set(id, seg);
             }
@@ -1179,7 +1179,7 @@
         return total;
     }
 
-    /** Une passe : fusionne des paires de segments disjointes. Retourne le nombre de fusions réussies. */
+    /** One pass: merges disjoint pairs of segments. Returns the number of successful merges. */
     async function mergePass(segments) {
         const known = new Map(segments);
         const getSeg = async (id) => {
@@ -1187,7 +1187,7 @@
             return known.get(id);
         };
 
-        // Sens du segment vu depuis un nœud : 'both', 'in' (arrive au nœud) ou 'out' (part du nœud).
+        // Direction of the segment seen from a node: 'both', 'in' (arrives at the node) or 'out' (leaves the node).
         const dirAt = (seg, nodeId) => {
             if (seg.isTwoWay) return 'both';
             const toward = nodeId === seg.toNodeId;
@@ -1204,21 +1204,21 @@
                 const node = await sdk.DataModel.Nodes.getById({ nodeId });
                 const ids = node?.connectedSegmentIds ?? [];
                 if (ids.length !== 2) continue;
-                if (!ids.every((id) => segments.has(id))) continue; // les deux segments doivent être dans la cible
+                if (!ids.every((id) => segments.has(id))) continue; // both segments must be in the target
                 if (ids.some((id) => used.has(id))) continue;
                 const [a, b] = await Promise.all(ids.map(getSeg));
                 if (!a || !b || a.id === b.id) continue;
                 if (a.roadType !== b.roadType || a.primaryStreetId !== b.primaryStreetId) continue;
                 if (Boolean(a.isTwoWay) !== Boolean(b.isTwoWay)) continue;
-                if (!a.isTwoWay && dirAt(a, nodeId) === dirAt(b, nodeId)) continue; // sens uniques incompatibles
+                if (!a.isTwoWay && dirAt(a, nodeId) === dirAt(b, nodeId)) continue; // incompatible one-way directions
                 if (Boolean(a.flagAttributes?.unpaved) !== Boolean(b.flagAttributes?.unpaved)) continue;
                 if (JSON.stringify(a.restrictions ?? []) !== JSON.stringify(b.restrictions ?? [])) continue;
-                // Vitesses limites : comparées dans chaque sens de circulation à travers le nœud.
+                // Speed limits: compared in each travel direction through the node.
                 const speedIn = (s) => (nodeId === s.toNodeId ? s.fwdSpeedLimit : s.revSpeedLimit);
                 const speedOut = (s) => (nodeId === s.fromNodeId ? s.fwdSpeedLimit : s.revSpeedLimit);
                 if ((speedIn(a) ?? null) !== (speedOut(b) ?? null)) continue;
                 if ((speedOut(a) ?? null) !== (speedIn(b) ?? null)) continue;
-                if (a.fromNodeId === b.fromNodeId && a.toNodeId === b.toNodeId) continue; // boucle
+                if (a.fromNodeId === b.fromNodeId && a.toNodeId === b.toNodeId) continue; // loop
                 used.add(a.id);
                 used.add(b.id);
                 pairs.push([a.id, b.id]);
@@ -1227,7 +1227,7 @@
 
         let merged = 0;
         for (const ids of pairs) {
-            // Une fusion touche les deux segments d'origine et en crée un nouveau (clé fictive : son id est inconnu).
+            // A merge touches the two original segments and creates a new one (dummy key: its id is unknown).
             if (!reserveEdits([...ids.map((id) => `s${id}`), `merge-${Date.now()}-${merged}`])) break;
             try {
                 await sdk.DataModel.Segments.mergeSegments({ segmentIds: ids });
@@ -1241,12 +1241,12 @@
         return merged;
     }
 
-    /** Réduit les points de forme des segments ciblés (sélection, sinon visibles) sans déplacer leurs extrémités. */
+    /** Reduces the shape points of the target segments (selection, otherwise visible) without moving their end points. */
     async function simplifyGeometry() {
         try {
             let segments = await getTargetSegments();
             const merged = await mergeUselessNodes(segments);
-            if (merged > 0) segments = await getTargetSegments(); // les ids ont changé après fusion
+            if (merged > 0) segments = await getTargetSegments(); // ids changed after merging
             let removed = 0;
             for (const [id, segment] of segments) {
                 const coords = segment.geometry.coordinates;
@@ -1273,7 +1273,7 @@
     // ---------------------------------------------------------- refresh
 
     async function refresh() {
-        // Évite les exécutions concurrentes ; une demande reçue pendant un refresh en relance un.
+        // Avoids concurrent runs; a request received during a refresh triggers another one.
         if (refreshing) {
             refreshAgain = true;
             return;
@@ -1283,7 +1283,7 @@
             do {
                 refreshAgain = false;
                 await refreshCountry();
-                // Plus aucune modification en attente sans enregistrement : tout a été annulé, rien à compter.
+                // No unsaved change left: everything was undone, nothing to count.
                 if (!cleanRunning && await sdk.Editing.getUnsavedChangesCount() === 0) discardPendingEdits();
                 shortSegments = await findShortSegments();
                 unconnectedNodes = await findUnconnectedNodes();
@@ -1314,7 +1314,7 @@
         sdk.Events.on({
             eventName: 'wme-data-model-objects-added',
             eventHandler: ({ dataModelName, objectIds }) => {
-                // Les segments chargés depuis le serveur ont un id positif : seuls les nouveaux comptent.
+                // Segments loaded from the server have a positive id: only new ones matter.
                 if (dataModelName === 'segments' && objectIds.some((id) => id < 0)) scheduleRefresh();
             },
         });
@@ -1329,7 +1329,7 @@
             eventHandler: ({ dataModelName }) => {
                 if (dataModelName !== 'segments') return;
                 commitPendingEdits();
-                // Enregistré : plus rien à annuler côté Goldfish.
+                // Saved: nothing left to undo on Goldfish's side.
                 lastRun = null;
                 hideReport();
                 scheduleRefresh();
