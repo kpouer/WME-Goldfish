@@ -90,8 +90,23 @@
             grip: 'Déplacer (double-clic : réinitialiser)',
             optHide: 'Masquer les options',
             optShow: 'Options',
-            cleanTitle: 'Clean : exécute les actions cochées',
-            cleanTitleCount: (n) => `Clean : exécute les actions cochées (${n} segment${n > 1 ? 's' : ''} < ${MAX_LENGTH_M} m)`,
+            cleanTitle: 'Clean : résumé des actions cochées, puis application',
+            cleanTitleCount: (n) => `Clean : résumé des actions cochées, puis application (${n} segment${n > 1 ? 's' : ''} < ${MAX_LENGTH_M} m)`,
+            planTitle: 'Goldfish : changements prévus',
+            planNone: 'Aucun changement à faire',
+            planApply: 'Appliquer',
+            planDelete: (n) => `${n} segment(s) non enregistré(s) < ${MAX_LENGTH_M} m à supprimer`,
+            planClean: (n) => `${n} segment(s) à passer sans nom ni ville`,
+            planRoadType: (n) => `${n} segment(s) à passer en type Street`,
+            planUnpaved: (n) => `« Non bitumé » à retirer sur ${n} segment(s)`,
+            planTwoWay: (n) => `${n} segment(s) à passer en double sens`,
+            planMerge: (nodes, segs) => `${nodes} nœud(s) inutile(s) à supprimer par fusion (${segs} segment(s))`,
+            planGeometry: (n, p) => `${n} segment(s) à simplifier (${p} point(s) de forme retiré(s))`,
+            planMergedNote: 'Les segments issus des fusions seront aussi simplifiés.',
+            planQuota: (n, left) => `Environ ${n} édition(s) scriptée(s) ; il en reste ${left} dans l'heure`,
+            planQuotaOver: (n, left) => `Environ ${n} édition(s) scriptée(s) pour ${left} restante(s) dans l'heure : l'exécution s'arrêtera au plafond`,
+            planQuotaNone: (n) => `Environ ${n} édition(s) scriptée(s) (pas de plafond dans ce pays)`,
+            planStale: 'Goldfish : la carte a changé, résumé mis à jour',
             delete: `Supprimer les segments non enregistrés < ${MAX_LENGTH_M} m`,
             clean: 'Nettoyer les segments non enregistrés (sans nom, sans ville)',
             roadType: 'Type Street (segments non enregistrés)',
@@ -125,8 +140,23 @@
             grip: 'Move (double-click: reset)',
             optHide: 'Hide options',
             optShow: 'Options',
-            cleanTitle: 'Clean: runs the checked actions',
-            cleanTitleCount: (n) => `Clean: runs the checked actions (${n} segment${n > 1 ? 's' : ''} < ${MAX_LENGTH_M} m)`,
+            cleanTitle: 'Clean: summary of the checked actions, then apply',
+            cleanTitleCount: (n) => `Clean: summary of the checked actions, then apply (${n} segment${n > 1 ? 's' : ''} < ${MAX_LENGTH_M} m)`,
+            planTitle: 'Goldfish: planned changes',
+            planNone: 'Nothing to change',
+            planApply: 'Apply',
+            planDelete: (n) => `${n} unsaved segment(s) < ${MAX_LENGTH_M} m to delete`,
+            planClean: (n) => `${n} segment(s) to set to no name, no city`,
+            planRoadType: (n) => `${n} segment(s) to set to Street type`,
+            planUnpaved: (n) => `"Unpaved" to remove on ${n} segment(s)`,
+            planTwoWay: (n) => `${n} segment(s) to set to two-way`,
+            planMerge: (nodes, segs) => `${nodes} useless node(s) to remove by merging (${segs} segment(s))`,
+            planGeometry: (n, p) => `${n} segment(s) to simplify (${p} shape point(s) removed)`,
+            planMergedNote: 'The segments created by the merges will also be simplified.',
+            planQuota: (n, left) => `About ${n} scripted edit(s); ${left} left this hour`,
+            planQuotaOver: (n, left) => `About ${n} scripted edit(s) for ${left} left this hour: the run will stop at the cap`,
+            planQuotaNone: (n) => `About ${n} scripted edit(s) (no cap in this country)`,
+            planStale: 'Goldfish: the map changed, summary updated',
             delete: `Delete unsaved segments < ${MAX_LENGTH_M} m`,
             clean: 'Clean unsaved segments (no name, no city)',
             roadType: 'Street type (unsaved segments)',
@@ -776,58 +806,102 @@
         }
     }
 
-    /** Shows below the bar the list of changes of the last run, with an Undo button. */
-    function showReport(log, stopped) {
+    /**
+     * Fills the panel below the bar: a title, one line per category (a click selects its segments),
+     * notes ({ text, color }) and buttons ({ label, onClick, primary }). Shared by the summary and the report.
+     */
+    function showPanel(titleText, items, emptyText, notes, buttons) {
         setExpanded(false);
         reportPanel.replaceChildren();
         const title = document.createElement('div');
-        title.textContent = t('reportTitle');
+        title.textContent = titleText;
         Object.assign(title.style, { fontWeight: 'bold', marginBottom: '4px' });
         reportPanel.appendChild(title);
 
-        const list = document.createElement('ul');
-        Object.assign(list.style, { margin: '0', padding: '0 0 0 18px' });
-        for (const [kind, format] of LOG_ORDER) {
-            const entry = log.get(kind);
-            if (!entry) continue;
-            const item = document.createElement('li');
-            item.textContent = format(entry);
-            item.title = `${t('reportSelect')}\n${[...new Set(entry.ids)].join(', ')}`;
-            Object.assign(item.style, { cursor: 'pointer', margin: '2px 0' });
-            item.addEventListener('click', () => selectSegments(entry.ids));
-            list.appendChild(item);
-        }
-        if (list.children.length) {
+        if (items.length) {
+            const list = document.createElement('ul');
+            Object.assign(list.style, { margin: '0', padding: '0 0 0 18px' });
+            for (const { text, ids } of items) {
+                const item = document.createElement('li');
+                item.textContent = text;
+                item.title = `${t('reportSelect')}\n${[...new Set(ids)].join(', ')}`;
+                Object.assign(item.style, { cursor: 'pointer', margin: '2px 0' });
+                item.addEventListener('click', () => selectSegments(ids));
+                list.appendChild(item);
+            }
             reportPanel.appendChild(list);
         } else {
             const none = document.createElement('div');
-            none.textContent = t('reportNone');
+            none.textContent = emptyText;
             none.style.color = '#888';
             reportPanel.appendChild(none);
         }
-        if (stopped) {
-            const warn = document.createElement('div');
-            warn.textContent = t('reportStopped');
-            Object.assign(warn.style, { color: '#c62828', marginTop: '4px' });
-            reportPanel.appendChild(warn);
+        for (const { text, color } of notes) {
+            const note = document.createElement('div');
+            note.textContent = text;
+            Object.assign(note.style, { color: color ?? '#555', marginTop: '4px' });
+            reportPanel.appendChild(note);
         }
 
-        const buttons = document.createElement('div');
-        Object.assign(buttons.style, { display: 'flex', justifyContent: 'flex-end', gap: '6px', marginTop: '6px' });
-        const makeButton = (label, onClick) => {
+        const row = document.createElement('div');
+        Object.assign(row.style, { display: 'flex', justifyContent: 'flex-end', gap: '6px', marginTop: '6px' });
+        for (const { label, onClick, primary } of buttons) {
             const b = document.createElement('button');
             b.textContent = label;
             Object.assign(b.style, BTN_STYLE, { height: '26px', padding: '0 10px', border: '1px solid #c0c0c0', borderRadius: '4px' });
+            if (primary) Object.assign(b.style, { fontWeight: 'bold', borderColor: '#1a73e8', color: '#1a73e8' });
             addPressFeedback(b);
             b.addEventListener('click', onClick);
-            return b;
-        };
-        if (lastRun) buttons.appendChild(makeButton(t('undo'), undoLastRun));
-        buttons.appendChild(makeButton(t('close'), hideReport));
-        reportPanel.appendChild(buttons);
+            row.appendChild(b);
+        }
+        reportPanel.appendChild(row);
 
         reportPanel.style.display = 'block';
         positionBelowToolbar(reportPanel);
+    }
+
+    /** Shows below the bar the list of changes of the last run, with an Undo button. */
+    function showReport(log, stopped) {
+        const items = LOG_ORDER.filter(([kind]) => log.has(kind))
+            .map(([kind, format]) => ({ text: format(log.get(kind)), ids: log.get(kind).ids }));
+        const notes = stopped ? [{ text: t('reportStopped'), color: '#c62828' }] : [];
+        const buttons = [];
+        if (lastRun) buttons.push({ label: t('undo'), onClick: undoLastRun });
+        buttons.push({ label: t('close'), onClick: hideReport });
+        showPanel(t('reportTitle'), items, t('reportNone'), notes, buttons);
+    }
+
+    const PLAN_ORDER = [
+        ['delete', (e) => t('planDelete', e.ids.length)],
+        ['clean', (e) => t('planClean', e.ids.length)],
+        ['roadType', (e) => t('planRoadType', e.ids.length)],
+        ['unpaved', (e) => t('planUnpaved', e.ids.length)],
+        ['twoWay', (e) => t('planTwoWay', e.ids.length)],
+        ['merge', (e) => t('planMerge', e.extra, e.ids.length)],
+        ['geometry', (e) => t('planGeometry', e.ids.length, e.extra)],
+    ];
+
+    /** Summary before applying (charter §3.3): changes by category, estimated edits against the hourly cap. */
+    function showPlan(plan) {
+        const items = PLAN_ORDER.filter(([kind]) => plan.steps.has(kind))
+            .map(([kind, format]) => ({ text: format(plan.steps.get(kind)), ids: plan.steps.get(kind).ids }));
+        const notes = [];
+        if (plan.steps.has('merge')) notes.push({ text: t('planMergedNote') });
+        if (items.length) {
+            const limit = limitFor(currentCountry);
+            if (limit == null) {
+                notes.push({ text: t('planQuotaNone', plan.estimate) });
+            } else {
+                const left = Math.max(0, limit - committedCount(plan.countryKey) - pendingCount(plan.countryKey));
+                notes.push(plan.estimate > left
+                    ? { text: t('planQuotaOver', plan.estimate, left), color: '#c62828' }
+                    : { text: t('planQuota', plan.estimate, left) });
+            }
+        }
+        const buttons = [];
+        if (items.length) buttons.push({ label: t('planApply'), onClick: () => applyPlan(plan), primary: true });
+        buttons.push({ label: t('close'), onClick: hideReport });
+        showPanel(t('planTitle'), items, t('planNone'), notes, buttons);
     }
 
     /**
@@ -871,9 +945,10 @@
 
     // ------------------------------------------------------- deletion
 
-    async function deleteShortSegments() {
-        // Recompute so as not to delete based on a stale state.
-        const targets = await findShortSegments();
+    async function deleteShortSegments({ ids }) {
+        // Planned segments only, re-checked so as not to delete based on a stale state.
+        const planned = new Set(ids);
+        const targets = (await findShortSegments()).filter((s) => planned.has(s.id));
         let deleted = 0;
         for (const { id } of targets) {
             // An unsaved segment (negative id) does not exist server-side: deleting it does not count.
@@ -902,13 +977,24 @@
         return (await street).id;
     }
 
-    async function cleanNewSegments() {
-        // Unsaved segments only (negative id): an existing segment keeps its name and city.
-        const targets = (await sdk.DataModel.Segments.getAll()).filter((s) => s.id < 0).map((s) => ({ id: s.id }));
-        if (targets.length === 0) {
-            console.log(`[${SCRIPT_ID}] clean : aucun segment non enregistré`);
-            return;
+    /** Id of the unnamed street in the unnamed city, without creating anything (null if it does not exist yet). */
+    async function findEmptyStreetId() {
+        try {
+            const countryId = (await sdk.DataModel.Countries.getTopCountry())?.id;
+            if (countryId == null) return null;
+            const city = await sdk.DataModel.Cities.getCity({ cityName: '', countryId });
+            if (!city) return null;
+            const street = await sdk.DataModel.Streets.getStreet({ streetName: '', cityId: city.id });
+            return street?.id ?? null;
+        } catch (e) {
+            return null;
         }
+    }
+
+    async function cleanNewSegments({ ids }) {
+        // Planned segments: unsaved only (negative id), an existing segment keeps its name and city.
+        const targets = ids.filter((id) => id < 0).map((id) => ({ id }));
+        if (targets.length === 0) return;
         const streetId = await getEmptyStreetId();
         let cleaned = 0;
         for (const { id } of targets) {
@@ -927,14 +1013,12 @@
         console.log(`[${SCRIPT_ID}] ${cleaned}/${targets.length} segment(s) nettoyé(s)`);
     }
 
-    /** Unsaved segments (negative id) only: an existing segment is never modified here. */
-    async function getUnsavedIds() {
-        return (await sdk.DataModel.Segments.getAll()).filter((s) => s.id < 0).map((s) => s.id);
-    }
-
-    /** Applies `apply(segment, id)` to each unsaved segment; `apply` returns false if there is nothing to do. */
-    async function updateUnsaved(label, apply) {
-        const ids = await getUnsavedIds();
+    /**
+     * Applies `apply(segment, id)` to each planned unsaved segment (an existing segment is never modified here);
+     * `apply` returns false if there is nothing to do.
+     */
+    async function updateUnsaved(label, plannedIds, apply) {
+        const ids = plannedIds.filter((id) => id < 0);
         let done = 0;
         for (const id of ids) {
             if (quotaBlocked) break;
@@ -948,9 +1032,9 @@
         console.log(`[${SCRIPT_ID}] ${label} : ${done}/${ids.length} segment(s) modifié(s)`);
     }
 
-    function setRoadTypeStreet() {
+    function setRoadTypeStreet({ ids }) {
         // updateSegment fails (InvalidStateError) when nothing changes: avoid it.
-        return updateUnsaved('type Street', async (segment, id) => {
+        return updateUnsaved('type Street', ids, async (segment, id) => {
             if (segment.roadType === STREET_ROAD_TYPE) return false;
             if (!reserveEdits([`s${id}`])) return false;
             await sdk.DataModel.Segments.updateSegment({ segmentId: id, roadType: STREET_ROAD_TYPE });
@@ -958,8 +1042,8 @@
         });
     }
 
-    function removeUnpaved() {
-        return updateUnsaved('non bitumé', async (segment, id) => {
+    function removeUnpaved({ ids }) {
+        return updateUnsaved('non bitumé', ids, async (segment, id) => {
             if (!segment.flagAttributes?.unpaved) return false;
             if (!reserveEdits([`s${id}`])) return false;
             await sdk.DataModel.Segments.updateSegment({ segmentId: id, flagAttributes: { unpaved: false } });
@@ -967,8 +1051,8 @@
         });
     }
 
-    function setTwoWay() {
-        return updateUnsaved('double sens', async (segment, id) => {
+    function setTwoWay({ ids }) {
+        return updateUnsaved('double sens', ids, async (segment, id) => {
             if (segment.isTwoWay) return false;
             if (!reserveEdits([`s${id}`])) return false;
             await sdk.DataModel.Segments.updateDirection({ segmentId: id, direction: 'TWO_WAY' });
@@ -976,40 +1060,144 @@
         });
     }
 
-    /** Runs the checked actions, in order. */
-    async function runClean() {
-        cleanButton.disabled = true;
-        cleanButton.style.opacity = '0.5'; // run in progress
+    /** Greys out the Clean button while the summary is computed or the plan is applied. */
+    function setBusy(busy) {
+        cleanButton.disabled = busy;
+        cleanButton.style.opacity = busy ? '0.5' : '1';
         cleanButton.style.transform = 'none';
-        // Country of the action (hourly cap): re-read at launch, the map may have moved.
+        if (!busy) {
+            cleanButton.blur();
+            cleanButton.style.background = 'transparent';
+        }
+    }
+
+    /** Clean button: computes the changes of the checked actions without writing anything, then shows the summary. */
+    async function runClean() {
+        setBusy(true);
+        hideReport();
+        try {
+            showPlan(await buildPlan());
+        } catch (e) {
+            console.error(`[${SCRIPT_ID}] erreur du résumé`, e);
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    /**
+     * Dry run of the checked actions. Returns { countryKey, unsavedCount, steps, estimate } where `steps` maps
+     * a category to { ids, extra }. Later steps see the attribute changes of the earlier ones (simulated copies),
+     * so that the merges planned after a clean are the ones that will really happen.
+     */
+    async function buildPlan() {
+        await refreshCountry();
+        updateQuotaLabel();
+        const checked = (key) => checkboxes[key].checked;
+        const plan = {
+            countryKey: currentCountry.key,
+            unsavedCount: await sdk.Editing.getUnsavedChangesCount(),
+            steps: new Map(),
+            estimate: 0,
+        };
+        const add = (kind, ids, extra = 0) => { if (ids.length) plan.steps.set(kind, { ids, extra }); };
+        const all = await sdk.DataModel.Segments.getAll();
+        const sim = new Map(all.map((s) => [s.id, s]));
+        const patch = (id, change) => sim.set(id, { ...sim.get(id), ...change });
+
+        const deleted = new Set();
+        if (checked('delete')) {
+            const ids = (await findShortSegments()).map((s) => s.id);
+            for (const id of ids) deleted.add(id);
+            add('delete', ids);
+        }
+        const unsaved = () => all.filter((s) => s.id < 0 && !deleted.has(s.id)).map((s) => sim.get(s.id));
+        if (checked('clean')) {
+            const emptyId = await findEmptyStreetId();
+            const ids = unsaved().filter((s) => emptyId == null || s.primaryStreetId !== emptyId).map((s) => s.id);
+            // The empty street may not exist yet: a placeholder id, shared by all the cleaned segments.
+            for (const id of ids) patch(id, { primaryStreetId: emptyId ?? 'goldfish-empty-street' });
+            add('clean', ids);
+        }
+        if (checked('roadType')) {
+            const ids = unsaved().filter((s) => s.roadType !== STREET_ROAD_TYPE).map((s) => s.id);
+            for (const id of ids) patch(id, { roadType: STREET_ROAD_TYPE });
+            add('roadType', ids);
+        }
+        if (checked('unpaved')) {
+            const ids = unsaved().filter((s) => s.flagAttributes?.unpaved).map((s) => s.id);
+            for (const id of ids) patch(id, { flagAttributes: { ...sim.get(id).flagAttributes, unpaved: false } });
+            add('unpaved', ids);
+        }
+        if (checked('twoWay')) {
+            const ids = unsaved().filter((s) => !s.isTwoWay).map((s) => s.id);
+            for (const id of ids) patch(id, { isTwoWay: true });
+            add('twoWay', ids);
+        }
+        if (checked('geometry')) {
+            const targets = [...(await getTargetSegments()).keys()].filter((id) => sim.has(id) && !deleted.has(id));
+            const unsavedOnly = mergeUnsavedOnly();
+            const nodes = await findMergeableNodes(new Set(targets.filter((id) => !unsavedOnly || id < 0)), sim);
+            add('merge', [...new Set(nodes.flatMap((n) => n.ids))], nodes.length);
+            const ids = [];
+            let points = 0;
+            for (const id of targets) {
+                const coords = sim.get(id).geometry.coordinates;
+                const removed = coords.length - douglasPeucker(coords, DP_EPSILON_M).length;
+                if (removed === 0) continue;
+                ids.push(id);
+                points += removed;
+            }
+            add('geometry', ids, points);
+        }
+
+        // Estimated scripted edits: one per object (as reserveEdits counts them); a merge also touches the
+        // segments it creates (intermediate ones and a dummy key), hence two more per merged node.
+        const pending = pendingEdits.get(plan.countryKey) ?? new Set();
+        const keys = new Set();
+        for (const [kind, { ids }] of plan.steps) {
+            for (const id of ids) if (kind !== 'delete' || id >= 0) keys.add(`s${id}`);
+        }
+        plan.estimate = [...keys].filter((k) => !pending.has(k)).length + 2 * (plan.steps.get('merge')?.extra ?? 0);
+        return plan;
+    }
+
+    /** Applies the summary's plan, step by step; nothing outside the plan is written. */
+    async function applyPlan(plan) {
+        hideReport();
+        setBusy(true);
+        await refreshCountry();
+        // The map changed since the summary (other edit, other country): recompute and show it again.
+        if (currentCountry.key !== plan.countryKey || await sdk.Editing.getUnsavedChangesCount() !== plan.unsavedCount) {
+            showToast(t('planStale'), 4000);
+            setBusy(false);
+            return runClean();
+        }
         quotaBlocked = false;
         cleanRunning = true;
-        hideReport();
-        await refreshCountry();
         updateQuotaLabel();
         // State before the run, to be able to undo exactly what Clean did.
         runLog = new Map();
         const countryKey = currentCountry.key;
         const pendingBefore = new Set(pendingEdits.get(countryKey) ?? []);
-        const beforeCount = await sdk.Editing.getUnsavedChangesCount();
+        const beforeCount = plan.unsavedCount;
         const steps = [
             ['delete', deleteShortSegments],
             ['clean', cleanNewSegments],
             ['roadType', setRoadTypeStreet],
             ['unpaved', removeUnpaved],
             ['twoWay', setTwoWay],
-            ['geometry', simplifyGeometry],
         ];
         try {
             for (const [key, fn] of steps) {
-                if (!checkboxes[key].checked) continue;
+                if (!plan.steps.has(key)) continue;
                 if (quotaBlocked) break; // cap reached: do not chain the next steps
                 try {
-                    await fn();
+                    await fn(plan.steps.get(key));
                 } catch (e) {
                     console.error(`[${SCRIPT_ID}] erreur (${key})`, e);
                 }
             }
+            if (!quotaBlocked && (plan.steps.has('merge') || plan.steps.has('geometry'))) await simplifyGeometry(plan);
         } finally {
             const log = runLog;
             runLog = null;
@@ -1023,10 +1211,7 @@
                 console.error(`[${SCRIPT_ID}] erreur du rapport`, e);
             }
             cleanRunning = false;
-            cleanButton.blur();
-            cleanButton.disabled = false;
-            cleanButton.style.opacity = '1';
-            cleanButton.style.background = 'transparent';
+            setBusy(false);
             await refresh();
         }
     }
@@ -1151,26 +1336,66 @@
     }
 
     /**
-     * Merges segments joined by a "useless" node: a node with exactly 2 segments,
-     * same road type, same street (name and city), compatible directions, same speed limits,
-     * same "unpaved" option and same restrictions. In some countries (France), limited to unsaved segments (negative id). Returns the number of segments removed by merging.
+     * True if the node `nodeId` joining `a` and `b` is "useless": same road type, same street (name and city),
+     * compatible directions, same speed limits, same "unpaved" option and same restrictions, and no loop.
      */
-    async function mergeUselessNodes(targets) {
+    function canMergeAt(nodeId, a, b) {
+        if (!a || !b || a.id === b.id) return false;
+        // Direction of the segment seen from the node: 'both', 'in' (arrives at the node) or 'out' (leaves the node).
+        const dirAt = (seg) => {
+            if (seg.isTwoWay) return 'both';
+            return seg.isAtoB === (nodeId === seg.toNodeId) ? 'in' : 'out';
+        };
+        if (a.roadType !== b.roadType || a.primaryStreetId !== b.primaryStreetId) return false;
+        if (Boolean(a.isTwoWay) !== Boolean(b.isTwoWay)) return false;
+        if (!a.isTwoWay && dirAt(a) === dirAt(b)) return false; // incompatible one-way directions
+        if (Boolean(a.flagAttributes?.unpaved) !== Boolean(b.flagAttributes?.unpaved)) return false;
+        if (JSON.stringify(a.restrictions ?? []) !== JSON.stringify(b.restrictions ?? [])) return false;
+        // Speed limits: compared in each travel direction through the node.
+        const speedIn = (s) => (nodeId === s.toNodeId ? s.fwdSpeedLimit : s.revSpeedLimit);
+        const speedOut = (s) => (nodeId === s.fromNodeId ? s.fwdSpeedLimit : s.revSpeedLimit);
+        if ((speedIn(a) ?? null) !== (speedOut(b) ?? null)) return false;
+        if ((speedOut(a) ?? null) !== (speedIn(b) ?? null)) return false;
+        return !(a.fromNodeId === b.fromNodeId && a.toNodeId === b.toNodeId); // loop
+    }
+
+    /**
+     * Useless nodes whose two segments are both in `ids`, the segments being read from `segments`
+     * (id -> segment, possibly simulated copies). Returns [{ nodeId, ids: [a, b] }].
+     */
+    async function findMergeableNodes(ids, segments) {
+        const result = [];
+        const seen = new Set();
+        for (const id of ids) {
+            const segment = segments.get(id);
+            if (!segment) continue;
+            for (const nodeId of [segment.fromNodeId, segment.toNodeId]) {
+                if (nodeId == null || seen.has(nodeId)) continue;
+                seen.add(nodeId);
+                const node = await sdk.DataModel.Nodes.getById({ nodeId });
+                const connected = node?.connectedSegmentIds ?? [];
+                if (connected.length !== 2 || !connected.every((c) => ids.has(c))) continue;
+                const [a, b] = connected.map((c) => segments.get(c));
+                if (canMergeAt(nodeId, a, b)) result.push({ nodeId, ids: connected });
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Merges the planned segments (`allowedIds`) joined by useless nodes, plus the segments those merges create
+     * (`isCreated`). Unsaved segments only where mergeUnsavedOnly(). Returns the number of merges.
+     */
+    async function mergeUselessNodes(allowedIds, isCreated) {
         let total = 0;
-        // Target stable from one pass to the next: the selection may be lost after a merge.
-        // So we track the starting ids, plus the ids created by merges (absent from the initial state).
-        const initialVisible = new Set((await getVisibleSegments()).keys());
-        const targetIds = new Set(targets.keys());
         const unsavedOnly = mergeUnsavedOnly();
         // mergeSegments refuses groups of more than 2 segments: merge two at a time,
         // then re-read the data (ids change) until there is nothing left to merge.
         for (let pass = 0; pass < 20; pass++) {
-            const visible = await getVisibleSegments();
             const current = new Map();
-            for (const [id, seg] of visible) {
-                // In the affected countries, only unsaved segments (negative id) can be merged.
-                if (unsavedOnly && id >= 0) continue;
-                if ((targetIds.has(id) || !initialVisible.has(id))) current.set(id, seg);
+            for (const seg of await sdk.DataModel.Segments.getAll()) {
+                if (unsavedOnly && seg.id >= 0) continue;
+                if (allowedIds.has(seg.id) || isCreated(seg.id)) current.set(seg.id, seg);
             }
             const n = await mergePass(current);
             if (n === 0 || quotaBlocked) break;
@@ -1181,48 +1406,12 @@
 
     /** One pass: merges disjoint pairs of segments. Returns the number of successful merges. */
     async function mergePass(segments) {
-        const known = new Map(segments);
-        const getSeg = async (id) => {
-            if (!known.has(id)) known.set(id, await sdk.DataModel.Segments.getById({ segmentId: id }));
-            return known.get(id);
-        };
-
-        // Direction of the segment seen from a node: 'both', 'in' (arrives at the node) or 'out' (leaves the node).
-        const dirAt = (seg, nodeId) => {
-            if (seg.isTwoWay) return 'both';
-            const toward = nodeId === seg.toNodeId;
-            return seg.isAtoB === toward ? 'in' : 'out';
-        };
-
         const pairs = [];
         const used = new Set();
-        const seen = new Set();
-        for (const segment of segments.values()) {
-            for (const nodeId of [segment.fromNodeId, segment.toNodeId]) {
-                if (nodeId == null || seen.has(nodeId)) continue;
-                seen.add(nodeId);
-                const node = await sdk.DataModel.Nodes.getById({ nodeId });
-                const ids = node?.connectedSegmentIds ?? [];
-                if (ids.length !== 2) continue;
-                if (!ids.every((id) => segments.has(id))) continue; // both segments must be in the target
-                if (ids.some((id) => used.has(id))) continue;
-                const [a, b] = await Promise.all(ids.map(getSeg));
-                if (!a || !b || a.id === b.id) continue;
-                if (a.roadType !== b.roadType || a.primaryStreetId !== b.primaryStreetId) continue;
-                if (Boolean(a.isTwoWay) !== Boolean(b.isTwoWay)) continue;
-                if (!a.isTwoWay && dirAt(a, nodeId) === dirAt(b, nodeId)) continue; // incompatible one-way directions
-                if (Boolean(a.flagAttributes?.unpaved) !== Boolean(b.flagAttributes?.unpaved)) continue;
-                if (JSON.stringify(a.restrictions ?? []) !== JSON.stringify(b.restrictions ?? [])) continue;
-                // Speed limits: compared in each travel direction through the node.
-                const speedIn = (s) => (nodeId === s.toNodeId ? s.fwdSpeedLimit : s.revSpeedLimit);
-                const speedOut = (s) => (nodeId === s.fromNodeId ? s.fwdSpeedLimit : s.revSpeedLimit);
-                if ((speedIn(a) ?? null) !== (speedOut(b) ?? null)) continue;
-                if ((speedOut(a) ?? null) !== (speedIn(b) ?? null)) continue;
-                if (a.fromNodeId === b.fromNodeId && a.toNodeId === b.toNodeId) continue; // loop
-                used.add(a.id);
-                used.add(b.id);
-                pairs.push([a.id, b.id]);
-            }
+        for (const { ids } of await findMergeableNodes(new Set(segments.keys()), segments)) {
+            if (ids.some((id) => used.has(id))) continue;
+            for (const id of ids) used.add(id);
+            pairs.push(ids);
         }
 
         let merged = 0;
@@ -1241,14 +1430,24 @@
         return merged;
     }
 
-    /** Reduces the shape points of the target segments (selection, otherwise visible) without moving their end points. */
-    async function simplifyGeometry() {
+    /**
+     * Merges the planned useless nodes, then reduces the shape points of the planned segments and of the
+     * segments created by the merges, without moving their end points.
+     */
+    async function simplifyGeometry(plan) {
         try {
-            let segments = await getTargetSegments();
-            const merged = await mergeUselessNodes(segments);
-            if (merged > 0) segments = await getTargetSegments(); // ids changed after merging
+            const mergeStep = plan.steps.get('merge');
+            const geometryStep = plan.steps.get('geometry');
+            // A merge creates a new unsaved segment (negative id, absent before): it comes from planned segments.
+            const initial = new Set((await sdk.DataModel.Segments.getAll()).map((s) => s.id));
+            const isCreated = (id) => id < 0 && !initial.has(id);
+            const merged = mergeStep ? await mergeUselessNodes(new Set(mergeStep.ids), isCreated) : 0;
+            const planned = new Set([...(geometryStep?.ids ?? []), ...(mergeStep?.ids ?? [])]);
             let removed = 0;
-            for (const [id, segment] of segments) {
+            for (const segment of await sdk.DataModel.Segments.getAll()) {
+                const id = segment.id;
+                if (!planned.has(id) && !isCreated(id)) continue;
+                if (quotaBlocked) break;
                 const coords = segment.geometry.coordinates;
                 const simplified = douglasPeucker(coords, DP_EPSILON_M);
                 if (simplified.length === coords.length) continue;
