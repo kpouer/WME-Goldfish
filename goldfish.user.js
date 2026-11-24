@@ -2,9 +2,9 @@
 // @name         WME Goldfish
 // @namespace    https://github.com/kpouer/wme-goldfish
 // @version      0.12.0
-// @description  Goldfish, a fish to help you manage Koifish
-// @description:fr  Goldfish un poisson pour vous aider à gérer Koifish
-// @description:en  Goldfish, a fish to help you manage Koifish
+// @description  Goldfish, a fish to help you manage Koifish. It helps editing segments, their geometry and intersections. It can delete unsaved segments shorter than 1 m, remove their name and city, set them to Street type and two-way, remove the "unpaved" option, merge segments joined by a useless node and simplify their geometry; it also flags unconnected nodes. Every change is listed in a summary and applied only after confirmation.
+// @description:fr  Goldfish un poisson pour vous aider à gérer Koifish. Il aide à l'édition des segments, de leur géométrie et de leurs intersections. Il peut supprimer les segments non enregistrés de moins de 1 m, leur retirer nom et ville, les passer en type Street et en double sens, retirer l'option « non bitumé », fusionner les segments reliés par un nœud inutile et simplifier leur géométrie ; il signale aussi les nœuds non connectés. Chaque modification est listée dans un résumé et n'est appliquée qu'après validation.
+// @description:en  Goldfish, a fish to help you manage Koifish. It helps editing segments, their geometry and intersections. It can delete unsaved segments shorter than 1 m, remove their name and city, set them to Street type and two-way, remove the "unpaved" option, merge segments joined by a useless node and simplify their geometry; it also flags unconnected nodes. Every change is listed in a summary and applied only after confirmation.
 // @author       kpouer
 // @match        https://www.waze.com/editor*
 // @match        https://www.waze.com/*/editor*
@@ -88,7 +88,7 @@
     // ------------------------------------------------------------- i18n
     const MESSAGES = {
         fr: {
-            tabDesc: () => `Goldfish, un poisson pour vous aider à gérer Koifish`,
+            tabDesc: () => `Goldfish, un poisson pour vous aider à gérer Koifish. Il aide à l'édition des segments, de leur géométrie et de leurs intersections. Il peut supprimer les segments non enregistrés de moins de ${MAX_LENGTH_M} m, leur retirer nom et ville, les passer en type Street et en double sens, retirer l'option « non bitumé », fusionner les segments reliés par un nœud inutile et simplifier leur géométrie ; il signale aussi les nœuds non connectés. Chaque modification est listée dans un résumé et n'est appliquée qu'après validation.`,
             grip: 'Déplacer (double-clic : réinitialiser)',
             optHide: 'Masquer les options',
             optShow: 'Options',
@@ -140,7 +140,7 @@
             quotaReached: (name, limit) => `Goldfish : plafond de ${limit} éditions scriptées par heure atteint (${name}), actions interrompues`,
         },
         en: {
-            tabDesc: () => `Goldfish, a fish to help you manage Koifish`,
+            tabDesc: () => `Goldfish, a fish to help you manage Koifish. It helps editing segments, their geometry and intersections. It can delete unsaved segments shorter than ${MAX_LENGTH_M} m, remove their name and city, set them to Street type and two-way, remove the "unpaved" option, merge segments joined by a useless node and simplify their geometry; it also flags unconnected nodes. Every change is listed in a summary and applied only after confirmation.`,
             grip: 'Move (double-click: reset)',
             optHide: 'Hide options',
             optShow: 'Options',
