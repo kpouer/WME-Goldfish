@@ -36,8 +36,6 @@
     const QUOTA_DISPLAY_MS = 30 * 1000;      // rafraîchissement de l'affichage (les éditions sortent de la fenêtre)
     // Plafond d'éditions scriptées par heure, par pays (clé : code pays WME, ou nom). Charte France §3.3 : 500/h.
     const HOURLY_LIMITS = { FR: 500, France: 500 };
-    // Pays où la fusion de segments est interdite (mergeSegments recrée le segment : charte France §3.1).
-    const MERGE_FORBIDDEN = new Set(['FR', 'France']);
     // Pays où la fusion de segments est limitée aux segments non enregistrés (liste à compléter).
     const MERGE_UNSAVED_ONLY = { FR: true, France: true };
 
@@ -94,7 +92,7 @@
             unpaved: 'Retirer « non bitumé » (segments non enregistrés)',
             twoWay: 'Double sens (segments non enregistrés)',
             geometry: 'Simplifier la géométrie (points de forme, nœuds inutiles)',
-            geometryNoMerge: 'Simplifier la géométrie (points de forme ; fusion de segments interdite ici)',
+            geometryMergeUnsaved: 'Simplifier la géométrie (points de forme, nœuds inutiles ; fusion limitée aux segments non enregistrés)',
             mergeFailed: (msg) => `Goldfish : fusion impossible (${msg})`,
             reportTitle: 'Goldfish : changements effectués',
             reportNone: 'Aucun changement',
@@ -129,7 +127,7 @@
             unpaved: 'Remove "unpaved" (unsaved segments)',
             twoWay: 'Two-way (unsaved segments)',
             geometry: 'Simplify geometry (shape points, useless nodes)',
-            geometryNoMerge: 'Simplify geometry (shape points; segment merge not allowed here)',
+            geometryMergeUnsaved: 'Simplify geometry (shape points, useless nodes; merge limited to unsaved segments)',
             mergeFailed: (msg) => `Goldfish: merge failed (${msg})`,
             reportTitle: 'Goldfish: changes made',
             reportNone: 'No change',
@@ -373,16 +371,10 @@
         return HOURLY_LIMITS[country.key] ?? HOURLY_LIMITS[country.name] ?? null;
     }
 
-    /** Vrai si la fusion ne doit toucher que des segments non enregistrés dans le pays courant. */
+    /** Vrai si la fusion ne doit toucher que des segments non enregistrés dans le pays courant (par prudence aussi si le pays est inconnu). */
     function mergeUnsavedOnly() {
-        if (!currentCountry) return false;
+        if (!currentCountry) return true;
         return Boolean(MERGE_UNSAVED_ONLY[currentCountry.key] ?? MERGE_UNSAVED_ONLY[currentCountry.name]);
-    }
-
-    /** Fusion de segments permise ? Refusée en France, et par prudence si le pays est inconnu. */
-    function isMergeAllowed() {
-        if (!currentCountry) return false;
-        return !MERGE_FORBIDDEN.has(currentCountry.key) && !MERGE_FORBIDDEN.has(currentCountry.name);
     }
 
     function toCountryInfo(country) {
@@ -736,7 +728,7 @@
         countLabel.style.fontWeight = 'bold';
         cleanButton.title = n === 0 ? t('cleanTitle') : t('cleanTitleCount', n);
         // La fusion de segments dépend du pays : le libellé suit le pays courant.
-        if (optionLabels.geometry) optionLabels.geometry.textContent = t(isMergeAllowed() ? 'geometry' : 'geometryNoMerge');
+        if (optionLabels.geometry) optionLabels.geometry.textContent = t(mergeUnsavedOnly() ? 'geometryMergeUnsaved' : 'geometry');
         updateQuotaLabel();
     }
 
@@ -1249,8 +1241,7 @@
     async function simplifyGeometry() {
         try {
             let segments = await getTargetSegments();
-            // Pas de fusion en France (la fusion recrée le segment) ; la simplification des points de forme reste faite.
-            const merged = isMergeAllowed() ? await mergeUselessNodes(segments) : 0;
+            const merged = await mergeUselessNodes(segments);
             if (merged > 0) segments = await getTargetSegments(); // les ids ont changé après fusion
             let removed = 0;
             for (const [id, segment] of segments) {
