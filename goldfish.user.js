@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME Goldfish
 // @namespace    https://github.com/kpouer/wme-goldfish
-// @version      0.12.0
+// @version      0.13.0
 // @description  Goldfish, a fish to help you manage Koifish. It helps editing segments, their geometry and intersections. It can delete unsaved segments shorter than 1 m, remove their name and city, set them to Street type and two-way, remove the "unpaved" option, merge segments joined by a useless node and simplify their geometry; it also flags unconnected nodes. Every change is listed in a summary and applied only after confirmation.
 // @description:fr  Goldfish un poisson pour vous aider à gérer Koifish. Il aide à l'édition des segments, de leur géométrie et de leurs intersections. Il peut supprimer les segments non enregistrés de moins de 1 m, leur retirer nom et ville, les passer en type Street et en double sens, retirer l'option « non bitumé », fusionner les segments reliés par un nœud inutile et simplifier leur géométrie ; il signale aussi les nœuds non connectés. Chaque modification est listée dans un résumé et n'est appliquée qu'après validation.
 // @description:en  Goldfish, a fish to help you manage Koifish. It helps editing segments, their geometry and intersections. It can delete unsaved segments shorter than 1 m, remove their name and city, set them to Street type and two-way, remove the "unpaved" option, merge segments joined by a useless node and simplify their geometry; it also flags unconnected nodes. Every change is listed in a summary and applied only after confirmation.
@@ -58,6 +58,8 @@
     let body;
     let countLabel;
     let cleanButton;
+    /** One toolbar button per action: key -> button (runs the summary of that action only). */
+    const actionButtons = {};
     const checkboxes = {};
     /** Text nodes of the checkbox labels (some change depending on the country). */
     const optionLabels = {};
@@ -567,6 +569,17 @@
         color: 'inherit',
     };
 
+    /** Actions, in the order they are applied (checkboxes and toolbar buttons). */
+    const ACTIONS = ['delete', 'clean', 'roadType', 'unpaved', 'twoWay', 'geometry'];
+    const ACTION_ICONS = {
+        delete: '🗑',
+        clean: '⌫',
+        roadType: 'St',
+        unpaved: '⛰',
+        twoWay: '⇄',
+        geometry: '〰',
+    };
+
     /** Visual feedback on a button: hover and press (the button "moves" on click). */
     function addPressFeedback(button) {
         const set = (background, transform) => {
@@ -604,7 +617,7 @@
 
         cleanButton = document.createElement('button');
         Object.assign(cleanButton.style, BTN_STYLE, { padding: '0 8px' });
-        cleanButton.addEventListener('click', runClean);
+        cleanButton.addEventListener('click', () => runClean());
         addPressFeedback(cleanButton);
 
         countLabel = document.createElement('span');
@@ -616,6 +629,17 @@
         quotaLabel = document.createElement('span');
         Object.assign(quotaLabel.style, { marginLeft: '6px', font: '11px sans-serif' });
         cleanButton.append(fishIcon, countLabel, quotaLabel);
+
+        // One button per action: summary of that action alone, then apply.
+        for (const key of ACTIONS) {
+            const button = document.createElement('button');
+            Object.assign(button.style, BTN_STYLE, { padding: '0 6px', borderLeft: '1px solid #e0e0e0', minWidth: '28px' });
+            button.textContent = ACTION_ICONS[key];
+            button.title = t(key);
+            button.addEventListener('click', () => runClean(new Set([key])));
+            addPressFeedback(button);
+            actionButtons[key] = button;
+        }
 
         toggleButton = document.createElement('button');
         Object.assign(toggleButton.style, BTN_STYLE, { padding: '0 6px', borderLeft: '1px solid #e0e0e0' });
@@ -641,7 +665,7 @@
         enableDrag(grip);
         grip.addEventListener('dblclick', dock);
 
-        toolbar.append(grip, cleanButton, toggleButton);
+        toolbar.append(grip, cleanButton, ...ACTIONS.map((key) => actionButtons[key]), toggleButton);
 
         // Options panel (added to body so the toolbar does not clip it).
         body = document.createElement('div');
@@ -660,9 +684,8 @@
         });
         body.addEventListener('click', (e) => e.stopPropagation());
 
-        const actionDefs = ['delete', 'clean', 'roadType', 'unpaved', 'twoWay', 'geometry'];
         const prefs = loadPrefs();
-        for (const key of actionDefs) {
+        for (const key of ACTIONS) {
             const label = document.createElement('label');
             Object.assign(label.style, { display: 'flex', alignItems: 'center', gap: '6px', margin: '3px 0', cursor: 'pointer' });
             const box = document.createElement('input');
@@ -825,7 +848,9 @@
         countLabel.style.fontWeight = 'bold';
         cleanButton.title = n === 0 ? t('cleanTitle') : t('cleanTitleCount', n);
         // Segment merging depends on the country: the label follows the current country.
-        if (optionLabels.geometry) optionLabels.geometry.textContent = t(mergeUnsavedOnly() ? 'geometryMergeUnsaved' : 'geometry');
+        const geometryText = t(mergeUnsavedOnly() ? 'geometryMergeUnsaved' : 'geometry');
+        if (optionLabels.geometry) optionLabels.geometry.textContent = geometryText;
+        if (actionButtons.geometry) actionButtons.geometry.title = geometryText;
         updateQuotaLabel();
     }
 
@@ -1170,23 +1195,28 @@
         });
     }
 
-    /** Greys out the Clean button while the summary is computed or the plan is applied. */
+    /** Greys out the Clean and action buttons while the summary is computed or the plan is applied. */
     function setBusy(busy) {
-        cleanButton.disabled = busy;
-        cleanButton.style.opacity = busy ? '0.5' : '1';
-        cleanButton.style.transform = 'none';
-        if (!busy) {
-            cleanButton.blur();
-            cleanButton.style.background = 'transparent';
+        for (const button of [cleanButton, ...Object.values(actionButtons)]) {
+            button.disabled = busy;
+            button.style.opacity = busy ? '0.5' : '1';
+            button.style.transform = 'none';
+            if (!busy) {
+                button.blur();
+                button.style.background = 'transparent';
+            }
         }
     }
 
-    /** Clean button: computes the changes of the checked actions without writing anything, then shows the summary. */
-    async function runClean() {
+    /**
+     * Clean button (checked actions) or action button (`keys` = that action): computes the changes
+     * without writing anything, then shows the summary.
+     */
+    async function runClean(keys = new Set(ACTIONS.filter((k) => checkboxes[k].checked))) {
         setBusy(true);
         hideReport();
         try {
-            showPlan(await buildPlan());
+            showPlan(await buildPlan(keys));
         } catch (e) {
             console.error(`[${SCRIPT_ID}] erreur du résumé`, e);
         } finally {
@@ -1199,11 +1229,12 @@
      * a category to { ids, extra }. Later steps see the attribute changes of the earlier ones (simulated copies),
      * so that the merges planned after a clean are the ones that will really happen.
      */
-    async function buildPlan() {
+    async function buildPlan(actions) {
         await refreshCountry();
         updateQuotaLabel();
-        const checked = (key) => checkboxes[key].checked;
+        const checked = (key) => actions.has(key);
         const plan = {
+            keys: actions,
             countryKey: currentCountry.key,
             unsavedCount: await sdk.Editing.getUnsavedChangesCount(),
             steps: new Map(),
@@ -1280,7 +1311,7 @@
         if (currentCountry.key !== plan.countryKey || await sdk.Editing.getUnsavedChangesCount() !== plan.unsavedCount) {
             showToast(t('planStale'), 4000);
             setBusy(false);
-            return runClean();
+            return runClean(plan.keys);
         }
         quotaBlocked = false;
         cleanRunning = true;
