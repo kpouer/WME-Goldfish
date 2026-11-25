@@ -63,6 +63,8 @@
     const checkboxes = {};
     /** Text nodes of the checkbox labels (some change depending on the country). */
     const optionLabels = {};
+    /** Checkbox rows of the options panel (their tooltip carries the description). */
+    const optionRows = {};
     let toggleButton;
     let expanded = false;
     let floating = false;
@@ -125,6 +127,13 @@
             twoWay: 'Double sens (segments non enregistrés)',
             geometry: 'Simplifier la géométrie (points de forme, nœuds inutiles)',
             geometryMergeUnsaved: 'Simplifier la géométrie (points de forme, nœuds inutiles ; fusion limitée aux segments non enregistrés)',
+            deleteDesc: `Supprime les segments non enregistrés de moins de ${MAX_LENGTH_M} m (entourés en rouge sur la carte). Un segment déjà enregistré n'est jamais supprimé.`,
+            cleanDesc: 'Place les segments non enregistrés dans la rue sans nom de la ville sans nom. Un segment déjà enregistré garde son nom et sa ville.',
+            roadTypeDesc: 'Passe les segments non enregistrés en type Street.',
+            unpavedDesc: 'Décoche l\'option « non bitumé » des segments non enregistrés.',
+            twoWayDesc: 'Passe les segments non enregistrés en double sens.',
+            geometryDesc: `Sur la sélection, sinon sur les segments visibles : fusionne deux segments reliés par un nœud qui n'en relie aucun autre quand ils ont les mêmes type, nom, sens, option non bitumé, restrictions et limites de vitesse, puis retire les points de forme qui s'écartent de moins de ${DP_EPSILON_M} m de la ligne (les extrémités sont gardées).`,
+            descNote: 'Un résumé des changements est affiché avant toute modification.',
             mergeFailed: (msg) => `Goldfish : fusion impossible (${msg})`,
             reportTitle: 'Goldfish : changements effectués',
             reportNone: 'Aucun changement',
@@ -177,6 +186,13 @@
             twoWay: 'Two-way (unsaved segments)',
             geometry: 'Simplify geometry (shape points, useless nodes)',
             geometryMergeUnsaved: 'Simplify geometry (shape points, useless nodes; merge limited to unsaved segments)',
+            deleteDesc: `Deletes unsaved segments shorter than ${MAX_LENGTH_M} m (circled in red on the map). A saved segment is never deleted.`,
+            cleanDesc: 'Puts unsaved segments on the unnamed street of the unnamed city. A saved segment keeps its name and city.',
+            roadTypeDesc: 'Sets unsaved segments to the Street road type.',
+            unpavedDesc: 'Unchecks the "unpaved" option of unsaved segments.',
+            twoWayDesc: 'Sets unsaved segments to two-way.',
+            geometryDesc: `On the selection, otherwise on the visible segments: merges two segments joined by a node that connects no other segment when they share type, name, direction, unpaved option, restrictions and speed limits, then removes the shape points less than ${DP_EPSILON_M} m off the line (end points are kept).`,
+            descNote: 'A summary of the changes is shown before anything is modified.',
             mergeFailed: (msg) => `Goldfish: merge failed (${msg})`,
             reportTitle: 'Goldfish: changes made',
             reportNone: 'No change',
@@ -580,6 +596,16 @@
         geometry: '〰',
     };
 
+    /** Short label of an action (the geometry one depends on the country). */
+    function actionLabel(key) {
+        return key === 'geometry' && mergeUnsavedOnly() ? t('geometryMergeUnsaved') : t(key);
+    }
+
+    /** Tooltip of an action: label, description, then the summary reminder. */
+    function actionTooltip(key) {
+        return `${actionLabel(key)}\n\n${t(`${key}Desc`)}\n\n${t('descNote')}`;
+    }
+
     /** Visual feedback on a button: hover and press (the button "moves" on click). */
     function addPressFeedback(button) {
         const set = (background, transform) => {
@@ -635,7 +661,7 @@
             const button = document.createElement('button');
             Object.assign(button.style, BTN_STYLE, { padding: '0 6px', borderLeft: '1px solid #e0e0e0', minWidth: '28px' });
             button.textContent = ACTION_ICONS[key];
-            button.title = t(key);
+            button.title = actionTooltip(key);
             button.addEventListener('click', () => runClean(new Set([key])));
             addPressFeedback(button);
             actionButtons[key] = button;
@@ -695,8 +721,10 @@
                 savePrefs({ ...loadPrefs(), checked: Object.fromEntries(Object.entries(checkboxes).map(([k, b]) => [k, b.checked])) });
             });
             checkboxes[key] = box;
-            optionLabels[key] = document.createTextNode(t(key));
+            optionLabels[key] = document.createTextNode(actionLabel(key));
+            label.title = actionTooltip(key);
             label.append(box, optionLabels[key]);
+            optionRows[key] = label;
             body.appendChild(label);
         }
         document.body.appendChild(body);
@@ -848,9 +876,9 @@
         countLabel.style.fontWeight = 'bold';
         cleanButton.title = n === 0 ? t('cleanTitle') : t('cleanTitleCount', n);
         // Segment merging depends on the country: the label follows the current country.
-        const geometryText = t(mergeUnsavedOnly() ? 'geometryMergeUnsaved' : 'geometry');
-        if (optionLabels.geometry) optionLabels.geometry.textContent = geometryText;
-        if (actionButtons.geometry) actionButtons.geometry.title = geometryText;
+        if (optionLabels.geometry) optionLabels.geometry.textContent = actionLabel('geometry');
+        if (optionRows.geometry) optionRows.geometry.title = actionTooltip('geometry');
+        if (actionButtons.geometry) actionButtons.geometry.title = actionTooltip('geometry');
         updateQuotaLabel();
     }
 
