@@ -39,10 +39,15 @@
     // Default rules = French charter: cap of 500 scripted edits per hour (§3.3), segment merging
     // limited to unsaved segments. They apply everywhere, including when the country is unknown.
     const DEFAULT_HOURLY_LIMIT = 500;
-    // Countries where the permissive rules apply (no hourly cap, merging of all segments).
+    // Hourly cap of scripted edits per country (WME country code or country name -> number).
+    // A country absent from this table gets DEFAULT_HOURLY_LIMIT; Infinity means no cap.
+    const COUNTRY_HOURLY_LIMITS = {
+        AG: Infinity
+    };
+    // Countries where merging of all segments is allowed (not only unsaved ones).
     // Entries: WME country code (e.g. 'BE') or country name. List to be determined.
     const PERMISSIVE_COUNTRIES = new Set([
-        // 'BE',
+        'AG'
     ]);
     /** Unknown country (map without country, SDK error): treated like France. */
     const UNKNOWN_COUNTRY = { key: '?', label: '?', name: '?' };
@@ -463,9 +468,10 @@
         return PERMISSIVE_COUNTRIES.has(country.key) || PERMISSIVE_COUNTRIES.has(country.name);
     }
 
-    /** Hourly cap of the country (null: no cap). */
+    /** Hourly cap of the country (Infinity: no cap; DEFAULT_HOURLY_LIMIT if not configured). */
     function limitFor(country) {
-        return isPermissive(country) ? null : DEFAULT_HOURLY_LIMIT;
+        const limit = COUNTRY_HOURLY_LIMITS[country.key] ?? COUNTRY_HOURLY_LIMITS[country.name];
+        return limit ?? DEFAULT_HOURLY_LIMIT;
     }
 
     /** True if merging must only touch unsaved segments in the current country. */
@@ -497,7 +503,7 @@
         const pending = pendingEdits.get(currentCountry.key) ?? new Set();
         const fresh = keys.filter((k) => !pending.has(k));
         const limit = limitFor(currentCountry);
-        if (limit != null && committedCount(currentCountry.key) + pending.size + fresh.length > limit) {
+        if (Number.isFinite(limit) && committedCount(currentCountry.key) + pending.size + fresh.length > limit) {
             quotaBlocked = true;
             showToast(t('quotaReached', currentCountry.name, limit), 6000);
             updateQuotaLabel();
@@ -534,8 +540,8 @@
     function updateQuotaLabel() {
         if (!quotaLabel) return;
         const limit = limitFor(currentCountry);
-        if (limit == null) {
-            quotaLabel.textContent = currentCountry.label;
+        if (!Number.isFinite(limit)) {
+            quotaLabel.textContent = `${currentCountry.label} ∞`;
             quotaLabel.style.color = '#888';
             quotaLabel.title = t('quotaCountry', currentCountry.name);
             return;
@@ -991,7 +997,7 @@
         if (plan.steps.has('merge')) notes.push({ text: t('planMergedNote') });
         if (items.length) {
             const limit = limitFor(currentCountry);
-            if (limit == null) {
+            if (!Number.isFinite(limit)) {
                 notes.push({ text: t('planQuotaNone', plan.estimate) });
             } else {
                 const left = Math.max(0, limit - committedCount(plan.countryKey) - pendingCount(plan.countryKey));
